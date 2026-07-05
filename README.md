@@ -2,7 +2,11 @@
 
 > Stop debugging the same error twice.
 
-Fix Memory MCP is a local-first error memory for AI coding agents. It lets Claude Code, Codex, Cursor-like agents, or any MCP client search your past fixes before trying another guess, then save the verified repair as a clean Markdown case.
+Fix Memory MCP is a local-first developer memory system for bugs.
+
+AI coding agents are fast, but they often behave like they have no memory. They may fix a Python path issue today, then spend tokens rediscovering the same `python.exe`, `venv`, `PATH`, `npm`, build, deployment, or MCP setup issue three days later.
+
+Fix Memory MCP gives Claude Code, Codex, Cursor-like agents, or any MCP client a curated memory of verified fixes. Before guessing, the agent can search your past bug fixes. After a real fix is verified, the agent can save the clean repair as a Markdown case.
 
 In plain English: it is a **debugging notebook for agents**.
 
@@ -26,6 +30,55 @@ Fix Memory MCP gives them a small long-term memory:
 - Failed-attempt notes so agents do not repeat dead ends
 - A stdio MCP server with tools for search, read, save, recent, and index rebuild
 - No cloud database, no external embedding API, no required network access
+
+## What Makes It Different
+
+This is not a general "remember everything I said" memory.
+
+Many AI memory features store user preferences, project notes, or broad conversation context. Fix Memory MCP stores a narrower kind of memory: **verified developer experience**.
+
+It does not embed every chat transcript. It saves only useful cases after a bug is fixed and verified:
+
+- the exact error
+- the project and environment context
+- the root cause
+- the patch summary
+- the verification command and result
+- the failed attempts that should not be repeated
+
+That curation step matters. If every conversation is saved, the memory becomes noisy. If only repaired bugs are saved, the memory becomes a useful debugging asset.
+
+## Why Markdown Instead of SQLite
+
+Fix cases are stored as Markdown because the data is developer knowledge, not ordinary business data.
+
+Markdown is a good fit because it is:
+
+- easy for humans to read and edit
+- easy for AI agents to read
+- friendly to Git, diff, merge, review, and sync
+- portable across machines and tools
+- transparent when a saved case contains private paths or sensitive details
+
+SQLite may become useful later for very large collections, full-text search, or team usage. For a personal developer memory system, Markdown keeps the memory inspectable and versionable.
+
+## Why TF-IDF Instead of Embeddings
+
+Many bug fixes are keyword-heavy. Errors often contain strong tokens such as:
+
+- `ModuleNotFoundError`
+- `python.exe`
+- `venv`
+- `PATH`
+- `pip`
+- `npm`
+- `cargo`
+- `MCP`
+- `ECONNREFUSED`
+
+TF-IDF is cheap, local, fast, private, and good enough for this kind of error retrieval. No embedding API key is required, and private bug history does not leave the machine.
+
+Embedding search can still be added later when the case library grows or when semantic matching becomes more important.
 
 ## What It Is Good At
 
@@ -184,7 +237,7 @@ python scripts/mcp_smoke.py
 
 ## Roadmap
 
-- SQLite + FTS5 index
+- Optional SQLite + FTS5 index for very large case libraries
 - Optional embedding backends
 - Better case sanitizer
 - Git diff capture after verification
