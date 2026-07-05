@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local fix-memory data
+data/.fix_memory_vectors.json
+data/fixes/*
+data/failed-attempts/*
+data/commands/*
+!data/fixes/.gitkeep
+!data/failed-attempts/.gitkeep
+!data/commands/.gitkeep
+
+# Local OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Logs and scratch
+*.log
+tmp/
+temp/

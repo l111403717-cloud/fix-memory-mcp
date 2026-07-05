@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fix Memory Workflow"
+  short_description: "代码报错先查向量错题库，修好后写回记录"
+  default_prompt: "Use $fix-memory-workflow to debug this code error with my local fix-memory case library."

@@ -1,0 +1,14 @@
+[project]
+name = "fix-memory-mcp"
+version = "0.1.0"
+description = "Local-first coding fix memory MCP server for AI agents."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["mcp"]
+
+[project.scripts]
+fix-memory = "scripts.fix_memory:main"
+fix-memory-mcp = "scripts.fix_memory_mcp:main"
+
+[tool.ruff]
+line-length = 100
