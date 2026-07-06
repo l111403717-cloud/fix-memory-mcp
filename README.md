@@ -35,9 +35,9 @@ Fix Memory MCP gives them a small long-term memory:
 
 This is not a general "remember everything I said" memory.
 
-Many AI memory features store user preferences, project notes, or broad conversation context. Fix Memory MCP stores a narrower kind of memory: **verified developer experience**.
+Many AI memory features store every detail. Fix Memory MCP is stricter: it stores curated long-term memory that helps future agents avoid repeated work.
 
-It does not embed every chat transcript. It saves only useful cases after a bug is fixed and verified:
+It does not embed every chat transcript. It saves useful, durable memory such as:
 
 - the exact error
 - the project and environment context
@@ -45,8 +45,12 @@ It does not embed every chat transcript. It saves only useful cases after a bug 
 - the patch summary
 - the verification command and result
 - the failed attempts that should not be repeated
+- user preferences and tool/API habits
+- environment facts such as paths, ports, Python/Node, Claude/Codex/CCSwitch setup
+- interview or learning weak spots
+- repeated workflows and dated episodes that may recur
 
-That curation step matters. If every conversation is saved, the memory becomes noisy. If only repaired bugs are saved, the memory becomes a useful debugging asset.
+That curation step matters. If every conversation is saved, the memory becomes noisy. If only durable memory is saved, the memory becomes a useful agent asset.
 
 ## Why Markdown Instead of SQLite
 
@@ -107,6 +111,13 @@ fix-memory-mcp/
     fixes/              # your private fixed cases
     failed-attempts/    # private "do not repeat" notes
     commands/           # private useful command notes
+    preferences/         # user habits, tools, model/API preferences
+    environments/        # OS, paths, ports, Python/Node, Claude/Codex/CCSwitch
+    workflows/           # repeated procedures
+    interviews/          # interview misses and learning weak spots
+    projects/            # project decisions and tradeoffs
+    prompts/             # reusable prompts
+    episodes/            # dated events that may recur
   scripts/
     fix_memory.py       # CLI
     fix_memory_mcp.py   # MCP stdio server
@@ -162,6 +173,31 @@ Rebuild the local vector index:
 python scripts/fix_memory.py rebuild-index
 ```
 
+Assess whether something deserves long-term memory:
+
+```bash
+python scripts/fix_memory.py assess \
+  --memory-type environment \
+  --title "API relay setup" \
+  --content "User uses CCSwitch and a local API relay for model routing."
+```
+
+Save or update long-term memory through the write gate:
+
+```bash
+python scripts/fix_memory.py remember \
+  --memory-type environment \
+  --title "API relay setup" \
+  --content "User uses CCSwitch and a local API relay for model routing." \
+  --tags "ccswitch,api,environment"
+```
+
+Search long-term memory with an optional type filter:
+
+```bash
+python scripts/fix_memory.py search-memory "API relay CCSwitch" --memory-type environment
+```
+
 ## MCP Server
 
 Run the server:
@@ -175,6 +211,9 @@ Tools exposed:
 - `save_fix_case`
 - `search_fixes`
 - `search_fixes_vector`
+- `search_memory`
+- `assess_memory`
+- `save_memory`
 - `get_fix_case`
 - `list_recent_fixes`
 - `rebuild_vector_index`
@@ -213,6 +252,39 @@ bug -> search memory -> repair -> verify -> save the clean fix
 ```
 
 ## Case Quality Rules
+
+## Write Gate
+
+Do not save every small event. Before saving, ask:
+
+- Will this be useful in the future?
+- Did it repeat more than twice?
+- Does it reflect a user habit?
+- Is it environment/API/path/account/tool configuration?
+- Was the fix verified?
+- Will it help the next agent avoid wasted work?
+
+Strong save signals:
+
+- repeated at least twice
+- took more than 10 minutes
+- involves environment/API/path/account/tool configuration
+- user explicitly said "remember"
+- missed interview/learning point
+- important project decision
+
+Uncertain first occurrences can be saved as `candidate` or `episode`. Repeated matches update the existing memory and increment `occurrence_count` instead of creating duplicates.
+
+Saved memories include metadata:
+
+```yaml
+memory_type: bug / preference / environment / workflow / interview / project / prompt / episode
+memory_status: candidate / active / archived
+occurrence_count: 1
+first_seen: 2026-07-06
+last_seen: 2026-07-06
+confidence: low / medium / high
+```
 
 A useful case should include:
 

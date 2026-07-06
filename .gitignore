@@ -12,9 +12,23 @@ data/.fix_memory_vectors.json
 data/fixes/*
 data/failed-attempts/*
 data/commands/*
+data/preferences/*
+data/environments/*
+data/workflows/*
+data/interviews/*
+data/projects/*
+data/prompts/*
+data/episodes/*
 !data/fixes/.gitkeep
 !data/failed-attempts/.gitkeep
 !data/commands/.gitkeep
+!data/preferences/.gitkeep
+!data/environments/.gitkeep
+!data/workflows/.gitkeep
+!data/interviews/.gitkeep
+!data/projects/.gitkeep
+!data/prompts/.gitkeep
+!data/episodes/.gitkeep
 
 # Local OS/editor noise
 .DS_Store

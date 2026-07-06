@@ -55,7 +55,8 @@ def main() -> None:
         assert 'ModuleNotFoundError: No module named "demo"' in body, "read_case lost quoted error text"
 
         recent = fix_memory.list_recent(limit=1)
-        assert recent and recent[0]["title"].startswith("修复案例：Python"), "recent list is empty or wrong"
+        assert recent and recent[0]["title"].startswith("\u4fee\u590d\u6848\u4f8b\uff1a"), "case title template is not readable Chinese"
+        assert recent and 'Python "path" ModuleNotFoundError' in recent[0]["title"], "recent list is empty or wrong"
 
         failed = run_cli(
             memory_root,
@@ -104,6 +105,61 @@ def main() -> None:
 
         rebuild_mcp = fix_memory_mcp.rebuild_vector_index()
         assert "Rebuilt vector index" in rebuild_mcp, "MCP vector rebuild helper failed"
+
+        weak = fix_memory.assess_memory_value("episode", "temporary typo", "typed one wrong letter")
+        assert weak["decision"] == "candidate", "weak episode should become candidate"
+
+        strong = fix_memory.assess_memory_value(
+            "environment",
+            "CCSwitch API relay",
+            "User uses local API relay at 127.0.0.1 for model routing",
+        )
+        assert strong["memory_status"] == "active", "environment memory should be active"
+
+        memory_args = argparse.Namespace(
+            memory_type="environment",
+            title="CCSwitch API relay",
+            content="User uses CCSwitch and a local API relay for model routing.",
+            project="demo",
+            tags="ccswitch,api,environment",
+            evidence="self-check first occurrence",
+            source_tool="self-check",
+            scope="global",
+            sensitivity="private",
+            duration_minutes=0,
+            verified=False,
+            repeat_observed=False,
+            user_requested=False,
+            force=False,
+        )
+        first_save = fix_memory.save_memory_entry(memory_args)
+        assert first_save["action"] == "created", "first memory save should create"
+        first_saved_text = Path(first_save["path"]).read_text(encoding="utf-8")
+        assert first_saved_text.splitlines()[0].startswith("\u8bb0\u5fc6\uff1a") or first_saved_text.startswith("---"), "memory body was not written"
+        assert "\u8bb0\u5fc6\uff1aCCSwitch API relay" in first_saved_text, "memory body template is not readable Chinese"
+        second_save = fix_memory.save_memory_entry(memory_args)
+        assert second_save["action"] == "updated", "second memory save should update duplicate"
+
+        saved_text = fix_memory.read_case(Path(second_save["path"]).name)
+        assert "occurrence_count: 2" in saved_text, "duplicate update did not increment occurrence_count"
+
+        memory_search = run_cli(memory_root, "search-memory", "CCSwitch API relay", "--memory-type", "environment")
+        assert "CCSwitch API relay" in memory_search, "search-memory did not find saved environment memory"
+
+        mcp_assess = fix_memory_mcp.assess_memory(
+            memory_type="interview",
+            title="Redis why not use",
+            content="User could not explain why Redis is not used.",
+        )
+        assert "save" in mcp_assess, "MCP assess_memory failed"
+
+        mcp_save = fix_memory_mcp.save_memory(
+            memory_type="interview",
+            title="Redis why not use",
+            content="User could not explain why Redis is not used.",
+            tags="redis,interview",
+        )
+        assert "created" in mcp_save, "MCP save_memory failed"
 
     print("self-check passed")
 

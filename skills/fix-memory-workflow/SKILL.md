@@ -7,7 +7,7 @@ description: Use when debugging code errors, build failures, test failures, depe
 
 ## Purpose
 
-Use the local fix-memory library as a code error notebook: search before spending tokens on a repeated bug, then save the verified fix so future agents can reuse it.
+Use the local fix-memory library as a long-term Memory Hub: search before spending tokens on repeated work, then save only verified or durable knowledge that future agents can reuse.
 
 Memory root:
 
@@ -17,18 +17,33 @@ Memory root:
 
 ## Workflow
 
-1. When a code error appears, pause before guessing.
-2. Search fix-memory using the original error plus framework, command, file path, package/module name, and OS/environment hints.
-3. If a similar case is found, explain whether it truly applies and which part will be reused.
-4. Debug and fix the issue normally.
-5. Verify with the relevant command or user-observable check.
-6. Save a clean fix case when the issue is real, repeatable, costly, environment-related, or likely useful later.
+1. Before starting, decide whether long-term memory may contain relevant context.
+2. Search fix-memory for relevant preference, environment, project, bug, workflow, interview, prompt, or episode memory.
+3. When a code error appears, pause before guessing and search using the original error plus framework, command, file path, package/module name, and OS/environment hints.
+4. If a similar case is found, explain whether it truly applies and which part will be reused.
+5. Debug, answer, or fix normally.
+6. Verify with the relevant command or user-observable check.
+7. Save or update memory only when it has durable future value.
+
+## Memory Types
+
+- `bug`: verified errors, root causes, fixes, and validation.
+- `preference`: user habits, tool preferences, model/API preferences, naming/style preferences.
+- `environment`: OS, paths, ports, local services, Python/Node, Claude/Codex/CCSwitch/API setup.
+- `project`: project decisions, architecture reasons, tradeoffs, constraints.
+- `workflow`: repeated procedures that happened more than twice.
+- `interview`: missed interview questions, weak knowledge points, simulation results.
+- `prompt`: reusable prompts and agent instructions.
+- `episode`: dated events that may recur but are not yet stable rules.
 
 ## Preferred Tools
 
 If MCP tools are available, use them first:
 
 ```text
+search_memory
+assess_memory
+save_memory
 search_fixes
 search_fixes_vector
 get_fix_case
@@ -37,21 +52,17 @@ list_recent_fixes
 rebuild_vector_index
 ```
 
-Use `search_fixes` by default because it performs hybrid keyword + local vector retrieval. Use `search_fixes_vector` when the error wording differs from the saved case and semantic similarity matters more than exact tokens.
+Use `search_memory` for preference, environment, project, workflow, interview, prompt, or episode memory.
+Use `search_fixes` by default for bug/fix cases because it performs hybrid keyword + local TF-IDF vector retrieval.
+Use `search_fixes_vector` when the error wording differs from the saved case and semantic similarity matters more than exact tokens.
+Use `assess_memory` before saving, then `save_memory` to create or update a memory through the write gate.
 
 If MCP is unavailable, use the CLI:
 
 ```powershell
 cd <absolute-path-to-fix-memory-mcp>
-python scripts\fix_memory.py search "报错关键词 框架 命令 文件路径"
-```
-
-The CLI defaults to hybrid search. Use explicit modes when needed:
-
-```powershell
 python scripts\fix_memory.py search "报错关键词 框架 命令 文件路径" --mode hybrid
-python scripts\fix_memory.py search "报错关键词 框架 命令 文件路径" --mode vector
-python scripts\fix_memory.py search "报错关键词 框架 命令 文件路径" --mode keyword
+python scripts\fix_memory.py search-memory "偏好 环境 项目 决策 关键词" --memory-type environment
 ```
 
 To create a new case without MCP:
@@ -61,7 +72,27 @@ cd <absolute-path-to-fix-memory-mcp>
 python scripts\fix_memory.py new --title "错误标题" --project "项目名" --language "语言" --framework "框架" --command "触发命令" --error "原始报错" --tags "标签1,标签2"
 ```
 
-After creating the Markdown file, fill in root cause, related files, patch summary, key diff, verification, reusable advice, failed attempts, and sensitive-info check.
+To save long-term memory without MCP:
+
+```powershell
+cd <absolute-path-to-fix-memory-mcp>
+python scripts\fix_memory.py remember --memory-type environment --title "记忆标题" --content "长期有用的内容" --tags "标签1,标签2"
+```
+
+## Write Gate
+
+Before saving, ask:
+
+- Will this be useful in the future?
+- Does it reflect the user's long-term habits?
+- Is it environment or API configuration?
+- Has it happened more than twice?
+- Is it a missed interview/learning point?
+- Will it help the next agent avoid wasted work?
+
+Save when at least one strong reason is true. Otherwise do not save. Prefer merging/updating existing memory over creating duplicates.
+
+Implementation rule: call `assess_memory` before saving when MCP is available. If the decision is `skip`, do not save unless the user explicitly asked. If the decision is `candidate`, save as candidate/episode. If the decision is `save`, save as active memory. `save_memory` should update a similar old memory and increment `occurrence_count` instead of creating duplicates.
 
 ## Search Query Pattern
 

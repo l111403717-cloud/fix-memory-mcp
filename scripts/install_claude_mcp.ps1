@@ -1,20 +1,27 @@
+param(
+    [string]$PythonPath = ""
+)
+
 $ErrorActionPreference = "Stop"
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $serverPath = Join-Path $projectRoot "scripts\fix_memory_mcp.py"
 $dataPath = Join-Path $projectRoot "data"
-$pythonPath = "D:\python312\python.exe"
 
-if (-not (Test-Path $pythonPath)) {
+if ([string]::IsNullOrWhiteSpace($PythonPath)) {
     $pythonCommand = Get-Command python.exe -ErrorAction Stop
-    $pythonPath = $pythonCommand.Source
+    $PythonPath = $pythonCommand.Source
+}
+
+if (-not (Test-Path $PythonPath)) {
+    throw "Python executable not found: $PythonPath"
 }
 
 if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
     throw "Cannot find claude command. Open the same PowerShell where 'claude' works, then run this script again."
 }
 
-Write-Host "Python: $pythonPath"
+Write-Host "Python: $PythonPath"
 Write-Host "Server: $serverPath"
 Write-Host "Data:   $dataPath"
 
@@ -36,7 +43,7 @@ claude mcp add `
     --scope user `
     fix-memory `
     -- `
-    "$pythonPath" `
+    "$PythonPath" `
     "$serverPath"
 
 claude mcp list

@@ -68,6 +68,9 @@ def main() -> None:
             assert any(tool["name"] == "search_fixes" for tool in tools)
             assert any(tool["name"] == "search_fixes_vector" for tool in tools)
             assert any(tool["name"] == "rebuild_vector_index" for tool in tools)
+            assert any(tool["name"] == "search_memory" for tool in tools)
+            assert any(tool["name"] == "assess_memory" for tool in tools)
+            assert any(tool["name"] == "save_memory" for tool in tools)
 
             write_message(
                 process,
@@ -114,6 +117,42 @@ def main() -> None:
                 },
             )
             assert "Python path smoke" in read_message(process)["result"]["content"][0]["text"]
+
+            write_message(
+                process,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 6,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "save_memory",
+                        "arguments": {
+                            "memory_type": "preference",
+                            "title": "Use CCSwitch",
+                            "content": "User prefers CCSwitch for model routing.",
+                            "tags": "ccswitch,preference",
+                        },
+                    },
+                },
+            )
+            assert "created" in read_message(process)["result"]["content"][0]["text"]
+
+            write_message(
+                process,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 7,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "search_memory",
+                        "arguments": {
+                            "query": "model routing CCSwitch",
+                            "memory_type": "preference",
+                        },
+                    },
+                },
+            )
+            assert "Use CCSwitch" in read_message(process)["result"]["content"][0]["text"]
         finally:
             process.terminate()
             process.wait(timeout=5)

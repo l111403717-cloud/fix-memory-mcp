@@ -53,11 +53,13 @@ def snippet(text: str, query_tokens: list[str], width: int = 180) -> str:
 
 
 def iter_markdown(root: Path) -> list[Path]:
-    buckets = [root / "fixes", root / "failed-attempts", root / "commands"]
-    files: list[Path] = []
-    for bucket in buckets:
-        if bucket.exists():
-            files.extend(bucket.rglob("*.md"))
+    if not root.exists():
+        return []
+    files = [
+        path
+        for path in root.rglob("*.md")
+        if not any(part.startswith(".") for part in path.relative_to(root).parts)
+    ]
     return sorted(files, key=lambda path: str(path.relative_to(root)).lower())
 
 

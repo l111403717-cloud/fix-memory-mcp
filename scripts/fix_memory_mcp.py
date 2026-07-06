@@ -57,6 +57,74 @@ def search_fixes(query: str, limit: int = 5) -> str:
 
 
 @mcp.tool()
+def search_memory(query: str, memory_type: str = "", limit: int = 5, mode: Literal["hybrid", "keyword", "vector"] = "hybrid") -> str:
+    """Search long-term memory with optional memory type filtering."""
+    results = fix_memory.search_memory_items(query, limit=limit, memory_type=memory_type, mode=mode)
+    return json.dumps(results, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def assess_memory(
+    memory_type: str,
+    title: str,
+    content: str,
+    verified: bool = False,
+    repeat_observed: bool = False,
+    duration_minutes: int = 0,
+    user_requested: bool = False,
+) -> str:
+    """Assess whether something should be saved as long-term memory."""
+    result = fix_memory.assess_memory_value(
+        memory_type,
+        title,
+        content,
+        verified=verified,
+        repeat_observed=repeat_observed,
+        duration_minutes=duration_minutes,
+        user_requested=user_requested,
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def save_memory(
+    memory_type: str,
+    title: str,
+    content: str,
+    project: str = "",
+    tags: str = "",
+    evidence: str = "",
+    source_tool: str = "mcp",
+    scope: str = "global",
+    sensitivity: Literal["public", "private", "secret"] = "private",
+    duration_minutes: int = 0,
+    verified: bool = False,
+    repeat_observed: bool = False,
+    user_requested: bool = False,
+    force: bool = False,
+) -> str:
+    """Save or update long-term memory through the write gate."""
+    args = argparse.Namespace(
+        memory_type=memory_type,
+        title=title,
+        content=content,
+        project=project,
+        tags=tags,
+        evidence=evidence,
+        source_tool=source_tool,
+        scope=scope,
+        sensitivity=sensitivity,
+        duration_minutes=duration_minutes,
+        verified=verified,
+        repeat_observed=repeat_observed,
+        user_requested=user_requested,
+        force=force,
+    )
+    result = fix_memory.save_memory_entry(args)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
 def search_fixes_vector(query: str, limit: int = 5) -> str:
     """Search local fix cases using only TF-IDF vector cosine similarity."""
     results = fix_memory.find_cases(query, limit, mode="vector")
