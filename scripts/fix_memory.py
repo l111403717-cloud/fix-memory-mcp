@@ -35,6 +35,37 @@ ENVIRONMENT_HINT_RE = re.compile(
     r"(?:\b(?:api|proxy|ccswitch|port|path|python|node|npm|pnpm|uv|venv|mcp|token|key|cookie|password|account)\b|账号|路径|端口|中转|环境|模型|代理|密钥)",
     re.IGNORECASE,
 )
+ERROR_HINT_RE = re.compile(
+    r"(?:\b(?:error|exception|traceback|failed|failure|cannot|can't|module not found|not found|timeout|refused|denied|permission|syntaxerror|typeerror|moduleerror|importerror|modulenotfounderror)\b|报错|错误|失败|不行|崩|连不上|拒绝|超时|权限)",
+    re.IGNORECASE,
+)
+TECH_CONTEXT_RE = re.compile(
+    r"(?:\b(?:build|test|deploy|nginx|docker|mcp|api|server|config|github|repo|repository)\b|构建|测试|部署|服务器|配置|仓库|项目)",
+    re.IGNORECASE,
+)
+REPEAT_HINT_RE = re.compile(r"(?:\bagain\b|\bstill\b|\brepeated\b|又|还是|重复|之前|上次|老问题)", re.IGNORECASE)
+EXPLICIT_MEMORY_RE = re.compile(
+    r"(?:fix-memory|错题库|报错库|历史记忆|先查|查一下记忆|search memory|remember this)",
+    re.IGNORECASE,
+)
+CONFIG_PATH_RE = re.compile(
+    r"(?:package\.json|pyproject\.toml|requirements\.txt|tsconfig|vite\.config|next\.config|docker-compose|Dockerfile|nginx|\.env|mcp|settings|config)",
+    re.IGNORECASE,
+)
+RUNTIME_DIR = ".runtime"
+TASK_STATE_FILE = "task_state.json"
+RETRIEVAL_CACHE_FILE = "retrieval_cache.json"
+CACHE_SIMILARITY_THRESHOLD = 0.72
+CACHE_MAX_AGE_HOURS = 12
+CANDIDATE_MAX_AGE_DAYS = 30
+ACTIVE_MEMORY_STATUS = "active"
+CANDIDATE_MEMORY_STATUS = "candidate"
+ARCHIVED_MEMORY_STATUS = "archived"
+SENSITIVE_CONTENT_RE = re.compile(
+    r"(?:\b(?:api[_-]?key|access[_-]?token|token|password|authorization|cookie)\s*[:=]\s*\S+|"
+    r"\b(?:sk[-_]|ghp_|github_pat_)[A-Za-z0-9_-]{12,}|\bBearer\s+[A-Za-z0-9._-]{12,})",
+    re.IGNORECASE,
+)
 
 
 def memory_root() -> Path:
@@ -65,6 +96,27 @@ def frontmatter_list(values: list[str]) -> str:
 def ensure_dirs(root: Path) -> None:
     for bucket in sorted(set(MEMORY_BUCKETS.values())):
         (root / bucket).mkdir(parents=True, exist_ok=True)
+    (root / RUNTIME_DIR).mkdir(parents=True, exist_ok=True)
+
+
+def runtime_path(name: str, root: Path | None = None) -> Path:
+    root = root or memory_root()
+    return root / RUNTIME_DIR / name
+
+
+def load_json_file(path: Path, default: dict[str, object]) -> dict[str, object]:
+    if not path.exists():
+        return dict(default)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return dict(default)
+    return data if isinstance(data, dict) else dict(default)
+
+
+def write_json_file(path: Path, data: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def bucket_for_memory(memory_type: str, status: str = "") -> str:
@@ -115,6 +167,282 @@ def write_memory_file(path: Path, meta: dict[str, object], body: str) -> None:
 
 def now_iso() -> str:
     return dt.datetime.now().replace(microsecond=0).isoformat()
+
+
+def parse_iso(value: str) -> dt.datetime | None:
+    try:
+        return dt.datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def task_state_default() -> dict[str, object]:
+    return {
+        "version": 1,
+        "current_task": None,
+    }
+
+
+def load_task_state(root: Path | None = None) -> dict[str, object]:
+    root = root or memory_root()
+    ensure_dirs(root)
+    return load_json_file(runtime_path(TASK_STATE_FILE, root), task_state_default())
+
+
+def save_task_state(data: dict[str, object], root: Path | None = None) -> dict[str, object]:
+    root = root or memory_root()
+    ensure_dirs(root)
+    data["version"] = 1
+    write_json_file(runtime_path(TASK_STATE_FILE, root), data)
+    return data
+
+
+def start_task_state(goal: str, project: str = "", task_id: str = "", root: Path | None = None) -> dict[str, object]:
+    timestamp = now_iso()
+    task = {
+        "task_id": task_id or slugify(f"{project}-{goal}")[:80],
+        "project": project,
+        "goal": goal,
+        "started_at": timestamp,
+        "last_updated": timestamp,
+        "memory_searched": False,
+        "searches": [],
+        "matched_memory": [],
+        "verified": [],
+        "notes": [],
+    }
+    return save_task_state({"version": 1, "current_task": task}, root)
+
+
+def current_task(data: dict[str, object]) -> dict[str, object] | None:
+    task = data.get("current_task")
+    return task if isinstance(task, dict) else None
+
+
+def append_task_event(
+    *,
+    event_type: str,
+    value: object,
+    root: Path | None = None,
+    project: str = "",
+    goal: str = "",
+) -> dict[str, object]:
+    data = load_task_state(root)
+    task = current_task(data)
+    if task is None:
+        task = current_task(start_task_state(goal or "ad-hoc task", project, root=root)) or {}
+        data = {"version": 1, "current_task": task}
+
+    timestamp = now_iso()
+    task["last_updated"] = timestamp
+    if event_type == "search":
+        task["memory_searched"] = True
+        searches = task.setdefault("searches", [])
+        if isinstance(searches, list):
+            searches.append(value)
+    elif event_type == "match":
+        matched = task.setdefault("matched_memory", [])
+        if isinstance(matched, list):
+            for item in value if isinstance(value, list) else [value]:
+                if item and item not in matched:
+                    matched.append(item)
+    elif event_type == "verified":
+        verified = task.setdefault("verified", [])
+        if isinstance(verified, list):
+            verified.append({"at": timestamp, "item": value})
+    elif event_type == "note":
+        notes = task.setdefault("notes", [])
+        if isinstance(notes, list):
+            notes.append({"at": timestamp, "note": value})
+    else:
+        notes = task.setdefault("notes", [])
+        if isinstance(notes, list):
+            notes.append({"at": timestamp, "note": f"{event_type}: {value}"})
+    data["current_task"] = task
+    return save_task_state(data, root)
+
+
+def clear_task_state(root: Path | None = None) -> dict[str, object]:
+    return save_task_state(task_state_default(), root)
+
+
+def should_search_memory(
+    query: str,
+    *,
+    context: str = "",
+    project: str = "",
+    command: str = "",
+    file_path: str = "",
+    memory_type: str = "",
+    force: bool = False,
+) -> dict[str, object]:
+    text = "\n".join(part for part in [query, context, project, command, file_path, memory_type] if part)
+    reasons: list[str] = []
+    has_error = bool(ERROR_HINT_RE.search(text))
+    has_environment_hint = bool(ENVIRONMENT_HINT_RE.search(text))
+    has_repeat = bool(REPEAT_HINT_RE.search(text))
+    has_explicit_memory_request = bool(EXPLICIT_MEMORY_RE.search(text))
+    has_tech_context = bool(TECH_CONTEXT_RE.search(text))
+    touches_config = bool(CONFIG_PATH_RE.search(file_path) or CONFIG_PATH_RE.search(command))
+
+    if force:
+        reasons.append("forced by caller")
+    if has_explicit_memory_request:
+        reasons.append("caller explicitly asked to use memory")
+    if has_error:
+        reasons.append("query/context contains a hard error or failure signal")
+    if has_repeat and (has_environment_hint or has_tech_context):
+        reasons.append("query/context suggests a repeated environment/tooling issue")
+    if touches_config and (has_error or has_repeat or has_explicit_memory_request):
+        reasons.append("configuration/tooling file is involved in an error or repeated issue")
+    if memory_type in STRONG_MEMORY_TYPES and (has_error or has_repeat or has_explicit_memory_request):
+        reasons.append(f"{memory_type} memory can affect this error/repeated task")
+
+    if reasons:
+        return {
+            "decision": "search",
+            "confidence": "high" if len(reasons) >= 2 else "medium",
+            "reasons": reasons,
+        }
+
+    return {
+        "decision": "skip",
+        "confidence": "medium",
+        "reasons": [
+            "no hard error, repeated-issue signal, or explicit memory request found; first-time repo/deploy checks should inspect the project directly"
+        ],
+    }
+
+
+def cache_default() -> dict[str, object]:
+    return {"version": 1, "entries": []}
+
+
+def load_retrieval_cache(root: Path | None = None) -> dict[str, object]:
+    root = root or memory_root()
+    ensure_dirs(root)
+    return load_json_file(runtime_path(RETRIEVAL_CACHE_FILE, root), cache_default())
+
+
+def save_retrieval_cache(data: dict[str, object], root: Path | None = None) -> dict[str, object]:
+    root = root or memory_root()
+    ensure_dirs(root)
+    data["version"] = 1
+    write_json_file(runtime_path(RETRIEVAL_CACHE_FILE, root), data)
+    return data
+
+
+def invalidate_retrieval_cache(root: Path | None = None) -> None:
+    """Discard cached retrievals after a memory write changes search results."""
+    root = root or memory_root()
+    cache_path = runtime_path(RETRIEVAL_CACHE_FILE, root)
+    if cache_path.exists():
+        cache_path.unlink()
+
+
+def query_tokens(query: str) -> set[str]:
+    return set(vector_search.tokenize(query))
+
+
+def token_similarity(left: str, right: str) -> float:
+    left_tokens = query_tokens(left)
+    right_tokens = query_tokens(right)
+    if not left_tokens or not right_tokens:
+        return 0.0
+    overlap = len(left_tokens & right_tokens)
+    return overlap / ((len(left_tokens) * len(right_tokens)) ** 0.5)
+
+
+def cache_entry_is_fresh(entry: dict[str, object], max_age_hours: int = CACHE_MAX_AGE_HOURS) -> bool:
+    created = parse_iso(str(entry.get("created_at", "")))
+    if not created:
+        return False
+    return dt.datetime.now() - created <= dt.timedelta(hours=max_age_hours)
+
+
+def find_cached_retrieval(
+    query: str,
+    *,
+    search_scope: str,
+    memory_type: str = "",
+    mode: str = "hybrid",
+    project: str = "",
+    threshold: float = CACHE_SIMILARITY_THRESHOLD,
+    max_age_hours: int = CACHE_MAX_AGE_HOURS,
+    root: Path | None = None,
+) -> dict[str, object] | None:
+    cache = load_retrieval_cache(root)
+    entries = cache.get("entries", [])
+    if not isinstance(entries, list):
+        return None
+
+    best: tuple[float, dict[str, object]] | None = None
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("search_scope") != search_scope or entry.get("mode") != mode:
+            continue
+        if memory_type and entry.get("memory_type") != memory_type:
+            continue
+        if project and entry.get("project") and entry.get("project") != project:
+            continue
+        if not cache_entry_is_fresh(entry, max_age_hours):
+            continue
+        similarity = token_similarity(query, str(entry.get("query", "")))
+        if similarity >= threshold and (best is None or similarity > best[0]):
+            best = (similarity, entry)
+
+    if best is None:
+        return None
+
+    similarity, entry = best
+    entry["last_used"] = now_iso()
+    entry["hit_count"] = int(entry.get("hit_count", 0)) + 1
+    save_retrieval_cache(cache, root)
+    return {**entry, "similarity": round(similarity, 6)}
+
+
+def store_retrieval_cache(
+    query: str,
+    results: list[dict[str, object]],
+    *,
+    search_scope: str,
+    memory_type: str = "",
+    mode: str = "hybrid",
+    project: str = "",
+    root: Path | None = None,
+) -> dict[str, object]:
+    cache = load_retrieval_cache(root)
+    entries = cache.get("entries", [])
+    if not isinstance(entries, list):
+        entries = []
+    timestamp = now_iso()
+    summary_results = [
+        {
+            "score": item.get("score"),
+            "relative_path": item.get("relative_path"),
+            "title": item.get("title"),
+            "memory_type": item.get("memory_type", item.get("meta_memory_type", "")),
+            "memory_status": item.get("memory_status", item.get("meta_memory_status", "")),
+            "snippet": item.get("snippet", ""),
+        }
+        for item in results
+    ]
+    entry = {
+        "query": query,
+        "search_scope": search_scope,
+        "memory_type": memory_type,
+        "mode": mode,
+        "project": project,
+        "created_at": timestamp,
+        "last_used": timestamp,
+        "hit_count": 0,
+        "results": summary_results,
+    }
+    entries.insert(0, entry)
+    cache["entries"] = entries[:100]
+    save_retrieval_cache(cache, root)
+    return entry
 
 
 def base_meta(
@@ -239,14 +567,90 @@ def build_case(args: argparse.Namespace) -> str:
     return dump_frontmatter(meta) + body
 
 
-def create_case(args: argparse.Namespace) -> Path:
-    root = memory_root()
+def write_case_file(args: argparse.Namespace, root: Path | None = None) -> Path:
+    root = root or memory_root()
     ensure_dirs(root)
     bucket = bucket_for_memory(getattr(args, "memory_type", "bug"), getattr(args, "status", "fixed"))
     path = root / bucket / f"{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}-{slugify(args.title)}.md"
     path.write_text(build_case(args), encoding="utf-8")
     vector_search.build_index(root)
     return path
+
+
+def fix_case_content(args: argparse.Namespace) -> str:
+    return "\n".join(
+        str(value)
+        for value in (
+            getattr(args, "title", ""),
+            getattr(args, "project", ""),
+            getattr(args, "language", ""),
+            getattr(args, "framework", ""),
+            getattr(args, "command", ""),
+            getattr(args, "error", ""),
+            getattr(args, "tags", ""),
+        )
+        if value
+    )
+
+
+def contains_sensitive_material(*values: object) -> bool:
+    return any(SENSITIVE_CONTENT_RE.search(str(value)) for value in values if value)
+
+
+def secret_skip_assessment() -> dict[str, object]:
+    return {
+        "decision": "skip",
+        "memory_status": ARCHIVED_MEMORY_STATUS,
+        "confidence": "high",
+        "reasons": ["secret-looking material must not be stored"],
+    }
+
+
+def save_fix_case_entry(args: argparse.Namespace) -> dict[str, object]:
+    root = memory_root()
+    ensure_dirs(root)
+    status = getattr(args, "status", "fixed")
+    memory_type = "failed_attempt" if status == "failed" else getattr(args, "memory_type", "bug")
+    content = fix_case_content(args)
+    assessment = assess_memory_value(
+        memory_type,
+        args.title,
+        content,
+        verified=bool(getattr(args, "verified", False)),
+        repeat_observed=bool(getattr(args, "repeat_observed", False)),
+        duration_minutes=int(getattr(args, "duration_minutes", 0)),
+        user_requested=bool(getattr(args, "user_requested", False)),
+    )
+    if getattr(args, "sensitivity", "private") == "secret" or contains_sensitive_material(
+        args.title, content
+    ):
+        assessment = secret_skip_assessment()
+
+    if assessment["decision"] == "skip":
+        return {"action": "skipped", "assessment": assessment}
+
+    args.memory_type = memory_type
+    args.memory_status = assessment["memory_status"]
+    args.confidence = assessment["confidence"]
+    duplicate = find_duplicate_memory(root, args)
+    if duplicate:
+        path = Path(str(duplicate["path"]))
+        update_existing_memory(path, args, assessment)
+        invalidate_retrieval_cache(root)
+        return {"action": "updated", "path": str(path), "assessment": assessment}
+
+    path = write_case_file(args, root)
+    invalidate_retrieval_cache(root)
+    return {"action": "created", "path": str(path), "assessment": assessment}
+
+
+def create_case(args: argparse.Namespace) -> Path:
+    """Backward-compatible case creator that now always uses the write gate."""
+    result = save_fix_case_entry(args)
+    if result["action"] == "skipped":
+        reasons = ", ".join(str(reason) for reason in result["assessment"]["reasons"])
+        raise ValueError(f"Fix case was not saved: {reasons}")
+    return Path(str(result["path"]))
 
 
 def new_case(args: argparse.Namespace) -> None:
@@ -279,7 +683,7 @@ def assess_memory_value(
         reasons.append(f"{memory_type} memory is durable by default")
     if memory_type == "workflow" and (repeat_observed or occurrence_count >= 2):
         reasons.append("workflow repeated enough to become reusable")
-    if ENVIRONMENT_HINT_RE.search(text):
+    if ENVIRONMENT_HINT_RE.search(text) and memory_type in {"environment", "preference"}:
         reasons.append("it involves environment/API/path/account/tool configuration")
 
     if reasons:
@@ -290,7 +694,7 @@ def assess_memory_value(
             "reasons": reasons,
         }
 
-    if memory_type in {"episode", "workflow", "prompt", "bug", "fix"}:
+    if memory_type in {"episode", "workflow", "prompt", "bug", "fix", "failed_attempt"}:
         return {
             "decision": "candidate",
             "memory_status": "candidate",
@@ -321,7 +725,7 @@ def assess_memory(args: argparse.Namespace) -> None:
 
 def build_memory_body(args: argparse.Namespace, assessment: dict[str, object]) -> str:
     timestamp = now_iso()
-    evidence = args.evidence or args.content
+    evidence = getattr(args, "evidence", "") or getattr(args, "content", "") or fix_case_content(args)
     return f"""# 记忆：{args.title}
 
 ## 类型
@@ -507,13 +911,53 @@ def enrich_result(root: Path, result: dict[str, object]) -> dict[str, object]:
     return result
 
 
+def archive_stale_candidates(root: Path | None = None, max_age_days: int = CANDIDATE_MAX_AGE_DAYS) -> int:
+    """Archive unpromoted candidate memories that have not recurred recently."""
+    root = root or memory_root()
+    cutoff = dt.datetime.now() - dt.timedelta(days=max_age_days)
+    archived = 0
+    for path in iter_cases(root):
+        meta, body = parse_frontmatter(path.read_text(encoding="utf-8", errors="ignore"))
+        if meta.get("memory_status") != CANDIDATE_MEMORY_STATUS:
+            continue
+        last_seen = parse_iso(str(meta.get("last_seen", "")))
+        if last_seen is None or last_seen > cutoff:
+            continue
+        meta["memory_status"] = ARCHIVED_MEMORY_STATUS
+        meta["status"] = ARCHIVED_MEMORY_STATUS
+        meta["last_seen"] = now_iso()
+        write_memory_file(path, meta, body)
+        archived += 1
+    return archived
+
+
+def filter_retrievable_results(
+    results: list[dict[str, object]], *, include_candidates: bool = False
+) -> list[dict[str, object]]:
+    allowed_statuses = {ACTIVE_MEMORY_STATUS}
+    if include_candidates:
+        allowed_statuses.add(CANDIDATE_MEMORY_STATUS)
+    return [
+        item
+        for item in results
+        if str(item.get("memory_status", item.get("meta_memory_status", ACTIVE_MEMORY_STATUS)))
+        in allowed_statuses
+    ]
+
+
 def find_duplicate_memory(root: Path, args: argparse.Namespace, threshold: float = 0.62) -> dict[str, object] | None:
-    query = f"{args.title}\n{args.content}\n{args.tags}"
+    content = getattr(args, "content", "") or fix_case_content(args)
+    query = f"{args.title}\n{content}\n{getattr(args, 'tags', '')}"
     candidates = [enrich_result(root, item) for item in find_cases(query, limit=8, root=root, mode="hybrid")]
     for item in candidates:
         if item.get("memory_type") != args.memory_type:
             continue
-        if slugify(str(item.get("title", ""))) == slugify(args.title):
+        if str(item.get("meta_project", "")) != str(getattr(args, "project", "")):
+            continue
+        if str(item.get("meta_scope", "global")) != str(getattr(args, "scope", "global")):
+            continue
+        candidate_title = str(item.get("meta_title", item.get("title", "")))
+        if slugify(candidate_title) == slugify(args.title):
             return item
         if float(item.get("score", 0.0)) >= threshold:
             return item
@@ -527,7 +971,7 @@ def update_existing_memory(path: Path, args: argparse.Namespace, assessment: dic
     occurrence_count = int(meta.get("occurrence_count", 1)) + 1
     current_status = str(meta.get("memory_status", "candidate"))
     new_status = "active" if occurrence_count >= 2 or assessment["memory_status"] == "active" else current_status
-    evidence = args.evidence or args.content
+    evidence = getattr(args, "evidence", "") or getattr(args, "content", "") or fix_case_content(args)
 
     meta.update(
         {
@@ -536,8 +980,8 @@ def update_existing_memory(path: Path, args: argparse.Namespace, assessment: dic
             "occurrence_count": occurrence_count,
             "last_seen": timestamp,
             "confidence": "high" if new_status == "active" else assessment["confidence"],
-            "scope": meta.get("scope") or args.scope,
-            "sensitivity": meta.get("sensitivity") or args.sensitivity,
+            "scope": meta.get("scope") or getattr(args, "scope", "global"),
+            "sensitivity": meta.get("sensitivity") or getattr(args, "sensitivity", "private"),
         }
     )
 
@@ -570,27 +1014,24 @@ def save_memory_entry(args: argparse.Namespace) -> dict[str, object]:
         user_requested=args.user_requested,
     )
 
-    if args.sensitivity == "secret" and not args.force:
-        assessment = {
-            "decision": "skip",
-            "memory_status": "archived",
-            "confidence": "high",
-            "reasons": ["secret material must not be saved without force"],
-        }
+    if args.sensitivity == "secret" or contains_sensitive_material(args.title, args.content, args.evidence):
+        assessment = secret_skip_assessment()
 
-    if assessment["decision"] == "skip" and not args.force:
+    if assessment["decision"] == "skip":
         return {"action": "skipped", "assessment": assessment}
 
     duplicate = find_duplicate_memory(root, args)
     if duplicate:
         path = Path(str(duplicate["path"]))
         update_existing_memory(path, args, assessment)
+        invalidate_retrieval_cache(root)
         return {"action": "updated", "path": str(path), "assessment": assessment}
 
     bucket = bucket_for_memory(args.memory_type)
     path = root / bucket / f"{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}-{slugify(args.title)}.md"
     write_memory_file(path, memory_meta(args, assessment), build_memory_body(args, assessment))
     vector_search.build_index(root)
+    invalidate_retrieval_cache(root)
     return {"action": "created", "path": str(path), "assessment": assessment}
 
 
@@ -599,7 +1040,12 @@ def save_memory(args: argparse.Namespace) -> None:
 
 
 def search_cases(args: argparse.Namespace) -> None:
-    results = find_cases(args.query, args.limit, mode=args.mode)
+    results = search_fix_items(
+        args.query,
+        args.limit,
+        mode=args.mode,
+        include_candidates=getattr(args, "include_candidates", False),
+    )
     for result in results:
         print(f"[{result['score']}] {result['relative_path']}")
         print(f"    {result['title']}")
@@ -608,20 +1054,179 @@ def search_cases(args: argparse.Namespace) -> None:
         print("No matching fix cases found.")
 
 
-def search_memory_items(query: str, limit: int = 5, memory_type: str = "", mode: str = "hybrid") -> list[dict[str, object]]:
+def search_fix_items(
+    query: str,
+    limit: int = 5,
+    mode: str = "hybrid",
+    include_candidates: bool = False,
+) -> list[dict[str, object]]:
     root = memory_root()
-    results = [enrich_result(root, item) for item in find_cases(query, max(limit * 4, 20), root=root, mode=mode)]
+    archive_stale_candidates(root)
+    results = [enrich_result(root, item) for item in find_cases(query, max(limit * 8, 40), root=root, mode=mode)]
+    return filter_retrievable_results(results, include_candidates=include_candidates)[:limit]
+
+
+def search_memory_items(
+    query: str,
+    limit: int = 5,
+    memory_type: str = "",
+    mode: str = "hybrid",
+    include_candidates: bool = False,
+) -> list[dict[str, object]]:
+    root = memory_root()
+    archive_stale_candidates(root)
+    results = [enrich_result(root, item) for item in find_cases(query, max(limit * 8, 40), root=root, mode=mode)]
     if memory_type:
         results = [
             item
             for item in results
             if item.get("memory_type") == memory_type or item.get("meta_memory_type") == memory_type
         ]
-    return results[:limit]
+    return filter_retrievable_results(results, include_candidates=include_candidates)[:limit]
+
+
+def smart_search(
+    query: str,
+    *,
+    search_scope: str = "memory",
+    limit: int = 5,
+    memory_type: str = "",
+    mode: str = "hybrid",
+    context: str = "",
+    project: str = "",
+    command: str = "",
+    file_path: str = "",
+    force: bool = False,
+    include_candidates: bool = False,
+) -> dict[str, object]:
+    if archive_stale_candidates(memory_root()):
+        invalidate_retrieval_cache()
+    gate = should_search_memory(
+        query,
+        context=context,
+        project=project,
+        command=command,
+        file_path=file_path,
+        memory_type=memory_type,
+        force=force,
+    )
+    if gate["decision"] == "skip" and not force:
+        append_task_event(
+            event_type="note",
+            value=f"retrieval skipped for query: {query}",
+            project=project,
+            goal=context or query,
+        )
+        return {
+            "action": "skipped",
+            "from_cache": False,
+            "gate": gate,
+            "results": [],
+        }
+
+    cached = find_cached_retrieval(
+        query,
+        search_scope=search_scope,
+        memory_type=memory_type,
+        mode=mode,
+        project=project,
+    )
+    if cached:
+        results = cached.get("results", [])
+        append_task_event(
+            event_type="search",
+            value={
+                "at": now_iso(),
+                "query": query,
+                "search_scope": search_scope,
+                "memory_type": memory_type,
+                "mode": mode,
+                "from_cache": True,
+                "cache_similarity": cached.get("similarity"),
+                "result_count": len(results) if isinstance(results, list) else 0,
+            },
+            project=project,
+            goal=context or query,
+        )
+        if isinstance(results, list):
+            append_task_event(
+                event_type="match",
+                value=[item.get("relative_path") for item in results if isinstance(item, dict)],
+                project=project,
+                goal=context or query,
+            )
+        return {
+            "action": "cache_hit",
+            "from_cache": True,
+            "gate": gate,
+            "cache": {
+                "query": cached.get("query"),
+                "similarity": cached.get("similarity"),
+                "hit_count": cached.get("hit_count"),
+                "created_at": cached.get("created_at"),
+            },
+            "results": results,
+        }
+
+    if search_scope == "fixes":
+        results = search_fix_items(
+            query, limit=limit, mode=mode, include_candidates=include_candidates
+        )
+    elif search_scope == "memory":
+        results = search_memory_items(
+            query,
+            limit=limit,
+            memory_type=memory_type,
+            mode=mode,
+            include_candidates=include_candidates,
+        )
+    else:
+        raise ValueError(f"Unknown smart search scope: {search_scope}")
+
+    store_retrieval_cache(
+        query,
+        results,
+        search_scope=search_scope,
+        memory_type=memory_type,
+        mode=mode,
+        project=project,
+    )
+    append_task_event(
+        event_type="search",
+        value={
+            "at": now_iso(),
+            "query": query,
+            "search_scope": search_scope,
+            "memory_type": memory_type,
+            "mode": mode,
+            "from_cache": False,
+            "result_count": len(results),
+        },
+        project=project,
+        goal=context or query,
+    )
+    append_task_event(
+        event_type="match",
+        value=[item.get("relative_path") for item in results],
+        project=project,
+        goal=context or query,
+    )
+    return {
+        "action": "searched",
+        "from_cache": False,
+        "gate": gate,
+        "results": results,
+    }
 
 
 def search_memory(args: argparse.Namespace) -> None:
-    results = search_memory_items(args.query, args.limit, args.memory_type, args.mode)
+    results = search_memory_items(
+        args.query,
+        args.limit,
+        args.memory_type,
+        args.mode,
+        getattr(args, "include_candidates", False),
+    )
     for result in results:
         memory_type = result.get("memory_type", result.get("meta_memory_type", "unknown"))
         memory_status = result.get("memory_status", result.get("meta_memory_status", "unknown"))
@@ -631,6 +1236,52 @@ def search_memory(args: argparse.Namespace) -> None:
         print(f"    {result['snippet']}")
     if not results:
         print("No matching memory found.")
+
+
+def gate_search(args: argparse.Namespace) -> None:
+    result = should_search_memory(
+        args.query,
+        context=args.context,
+        project=args.project,
+        command=args.command,
+        file_path=args.file_path,
+        memory_type=args.memory_type,
+        force=args.force,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def smart_search_cli(args: argparse.Namespace) -> None:
+    result = smart_search(
+        args.query,
+        search_scope=args.scope,
+        limit=args.limit,
+        memory_type=args.memory_type,
+        mode=args.mode,
+        context=args.context,
+        project=args.project,
+        command=args.command,
+        file_path=args.file_path,
+        force=args.force,
+        include_candidates=getattr(args, "include_candidates", False),
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def task_state_cli(args: argparse.Namespace) -> None:
+    if args.task_action == "start":
+        result = start_task_state(args.goal, args.project, args.task_id)
+    elif args.task_action == "show":
+        result = load_task_state()
+    elif args.task_action == "note":
+        result = append_task_event(event_type="note", value=args.note, project=args.project, goal=args.goal)
+    elif args.task_action == "verify":
+        result = append_task_event(event_type="verified", value=args.item, project=args.project, goal=args.goal)
+    elif args.task_action == "clear":
+        result = clear_task_state()
+    else:
+        raise SystemExit(f"Unknown task-state action: {args.task_action}")
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 def list_recent(limit: int = 10, root: Path | None = None) -> list[dict[str, str]]:
@@ -722,12 +1373,18 @@ def main() -> None:
     new_parser.add_argument("--source-tool", default="")
     new_parser.add_argument("--status", choices=["fixed", "failed", "partial"], default="fixed")
     new_parser.add_argument("--memory-type", choices=sorted(MEMORY_BUCKETS.keys()), default="bug")
+    new_parser.add_argument("--verified", action="store_true")
+    new_parser.add_argument("--repeat-observed", action="store_true")
+    new_parser.add_argument("--duration-minutes", type=int, default=0)
+    new_parser.add_argument("--user-requested", action="store_true")
+    new_parser.add_argument("--sensitivity", choices=["public", "private", "secret"], default="private")
     new_parser.set_defaults(func=new_case)
 
     search_parser = sub.add_parser("search", help="search fix cases")
     search_parser.add_argument("query")
     search_parser.add_argument("--limit", type=int, default=5)
     search_parser.add_argument("--mode", choices=["hybrid", "keyword", "vector"], default="hybrid")
+    search_parser.add_argument("--include-candidates", action="store_true")
     search_parser.set_defaults(func=search_cases)
 
     search_memory_parser = sub.add_parser("search-memory", help="search long-term memory with optional memory type filter")
@@ -735,7 +1392,54 @@ def main() -> None:
     search_memory_parser.add_argument("--memory-type", choices=sorted(MEMORY_BUCKETS.keys()), default="")
     search_memory_parser.add_argument("--limit", type=int, default=5)
     search_memory_parser.add_argument("--mode", choices=["hybrid", "keyword", "vector"], default="hybrid")
+    search_memory_parser.add_argument("--include-candidates", action="store_true")
     search_memory_parser.set_defaults(func=search_memory)
+
+    gate_parser = sub.add_parser("gate", help="decide whether a task should search long-term memory")
+    gate_parser.add_argument("query")
+    gate_parser.add_argument("--context", default="")
+    gate_parser.add_argument("--project", default="")
+    gate_parser.add_argument("--command", default="")
+    gate_parser.add_argument("--file-path", default="")
+    gate_parser.add_argument("--memory-type", choices=sorted(MEMORY_BUCKETS.keys()), default="")
+    gate_parser.add_argument("--force", action="store_true")
+    gate_parser.set_defaults(func=gate_search)
+
+    smart_parser = sub.add_parser("smart-search", help="use retrieval gate and semantic cache before searching")
+    smart_parser.add_argument("query")
+    smart_parser.add_argument("--scope", choices=["memory", "fixes"], default="memory")
+    smart_parser.add_argument("--memory-type", choices=sorted(MEMORY_BUCKETS.keys()), default="")
+    smart_parser.add_argument("--limit", type=int, default=5)
+    smart_parser.add_argument("--mode", choices=["hybrid", "keyword", "vector"], default="hybrid")
+    smart_parser.add_argument("--context", default="")
+    smart_parser.add_argument("--project", default="")
+    smart_parser.add_argument("--command", default="")
+    smart_parser.add_argument("--file-path", default="")
+    smart_parser.add_argument("--force", action="store_true")
+    smart_parser.add_argument("--include-candidates", action="store_true")
+    smart_parser.set_defaults(func=smart_search_cli)
+
+    task_parser = sub.add_parser("task-state", help="manage current task working memory")
+    task_sub = task_parser.add_subparsers(dest="task_action", required=True)
+    task_start = task_sub.add_parser("start", help="start a working-memory task")
+    task_start.add_argument("--goal", required=True)
+    task_start.add_argument("--project", default="")
+    task_start.add_argument("--task-id", default="")
+    task_start.set_defaults(func=task_state_cli)
+    task_show = task_sub.add_parser("show", help="show current working-memory task")
+    task_show.set_defaults(func=task_state_cli)
+    task_note = task_sub.add_parser("note", help="append a task note")
+    task_note.add_argument("--note", required=True)
+    task_note.add_argument("--project", default="")
+    task_note.add_argument("--goal", default="")
+    task_note.set_defaults(func=task_state_cli)
+    task_verify = task_sub.add_parser("verify", help="append a verification item")
+    task_verify.add_argument("--item", required=True)
+    task_verify.add_argument("--project", default="")
+    task_verify.add_argument("--goal", default="")
+    task_verify.set_defaults(func=task_state_cli)
+    task_clear = task_sub.add_parser("clear", help="clear current working-memory task")
+    task_clear.set_defaults(func=task_state_cli)
 
     recent_parser = sub.add_parser("recent", help="list recent cases")
     recent_parser.add_argument("--limit", type=int, default=10)

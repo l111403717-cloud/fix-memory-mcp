@@ -9,6 +9,7 @@ venv/
 
 # Local fix-memory data
 data/.fix_memory_vectors.json
+data/.runtime/
 data/fixes/*
 data/failed-attempts/*
 data/commands/*

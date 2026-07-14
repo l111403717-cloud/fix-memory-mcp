@@ -99,6 +99,10 @@ Embedding search can still be added later when the case library grows or when se
 - **Local-first memory**: cases live under `data/` as Markdown files.
 - **MCP server**: expose fix memory to AI coding tools through stdio.
 - **Hybrid retrieval**: keyword search plus local TF-IDF cosine similarity.
+- **Retrieval gate**: decide whether a task actually needs memory search before spending time on retrieval; first-time repo reviews and normal deployment checks should inspect the project directly.
+- **Working memory**: keep current task state, matched memories, notes, and verification without writing long-term memory.
+- **Semantic retrieval cache**: reuse recent similar retrieval results during a task instead of scanning the memory library again.
+- **Curated lifecycle**: first unverified cases become candidates, verified or repeated cases become active, and stale candidates archive after 30 days.
 - **Zero external AI dependency**: no OpenAI/Anthropic API key needed.
 - **Readable case format**: root cause, patch, verification, reusable advice.
 - **Privacy by default**: real fix cases are ignored by Git unless you choose to share them.
@@ -118,6 +122,7 @@ fix-memory-mcp/
     projects/            # project decisions and tradeoffs
     prompts/             # reusable prompts
     episodes/            # dated events that may recur
+    .runtime/            # local task state and retrieval cache, not long-term memory
   scripts/
     fix_memory.py       # CLI
     fix_memory_mcp.py   # MCP stdio server
@@ -152,6 +157,9 @@ python scripts/fix_memory.py new \
   --error "ModuleNotFoundError: No module named app" \
   --tags "python,path,fastapi,windows"
 ```
+
+Use `--verified` only after the repair has passed its relevant check. An unverified
+first occurrence is stored as a `candidate`, not returned by default retrieval.
 
 Search it later:
 
@@ -198,6 +206,29 @@ Search long-term memory with an optional type filter:
 python scripts/fix_memory.py search-memory "API relay CCSwitch" --memory-type environment
 ```
 
+Use the retrieval gate before searching. It should skip low-signal first-time tasks and search on hard/repeated issues:
+
+```bash
+python scripts/fix_memory.py gate "rename a small local variable"
+python scripts/fix_memory.py gate "ModuleNotFoundError python main.py"
+```
+
+Use smart search when you want the gate and cache to decide the cheapest path:
+
+```bash
+python scripts/fix_memory.py smart-search "CCSwitch API relay" \
+  --memory-type environment \
+  --context "API relay issue"
+```
+
+Track current task working memory:
+
+```bash
+python scripts/fix_memory.py task-state start --goal "debug API relay" --project demo
+python scripts/fix_memory.py task-state verify --item "nginx -t passed"
+python scripts/fix_memory.py task-state show
+```
+
 ## MCP Server
 
 Run the server:
@@ -212,6 +243,9 @@ Tools exposed:
 - `search_fixes`
 - `search_fixes_vector`
 - `search_memory`
+- `should_search_memory`
+- `smart_search_memory`
+- `task_state`
 - `assess_memory`
 - `save_memory`
 - `get_fix_case`
@@ -243,12 +277,34 @@ cd path\to\fix-memory-mcp
 .\scripts\install_claude_mcp.ps1
 ```
 
+Codex uses the same stdio model and starts the server on demand. Add this to the
+global `%USERPROFILE%\.codex\config.toml`, then restart Codex:
+
+```toml
+[mcp_servers.fix-memory]
+command = 'D:\python312\python.exe'
+args = ['C:\Users\<you>\Documents\资料库\fix-memory-mvp\scripts\fix_memory_mcp.py']
+startup_timeout_sec = 10
+
+[mcp_servers.fix-memory.env]
+FIX_MEMORY_ROOT = 'C:\Users\<you>\Documents\资料库\fix-memory-mvp\data'
+```
+
+Run a real stdio handshake before relying on the server:
+
+```powershell
+D:\python312\python.exe scripts\mcp_healthcheck.py --python D:\python312\python.exe
+```
+
+If the health check fails, continue the coding task without memory retrieval and
+use the CLI as a fallback. A broken memory server must not block debugging.
+
 ## Agent Prompt
 
 Use [FIX_MEMORY_AGENT_PROMPT.md](FIX_MEMORY_AGENT_PROMPT.md) to teach an agent this loop:
 
 ```text
-bug -> search memory -> repair -> verify -> save the clean fix
+task -> inspect project directly by default -> gate only for hard/repeated/explicit memory cases -> search/cache if useful -> repair -> verify -> save the clean fix
 ```
 
 ## Case Quality Rules
@@ -273,7 +329,18 @@ Strong save signals:
 - missed interview/learning point
 - important project decision
 
-Uncertain first occurrences can be saved as `candidate` or `episode`. Repeated matches update the existing memory and increment `occurrence_count` instead of creating duplicates.
+Every write path, including `save_fix_case`, uses the same gate. Unverified first
+fixes become `candidate`; verified, repeated, high-cost, or durable configuration
+memories become `active`. Default RAG retrieval returns only active memories. Pass
+`include_candidates: true` only when investigating recent, unconfirmed work.
+
+Candidates that do not recur for 30 days are archived during retrieval. Repeated
+matches update the existing memory and increment `occurrence_count` instead of
+creating duplicates. Duplicate matching is scoped to the same project and scope.
+
+Secret-looking content such as API keys, access tokens, passwords, authorization
+headers, and cookies is rejected before it reaches disk. `force` cannot override
+this protection.
 
 Saved memories include metadata:
 
@@ -305,6 +372,7 @@ Do not save full chats, full terminal logs, secrets, API keys, cookies, password
 ```bash
 python scripts/self_check.py
 python scripts/mcp_smoke.py
+python scripts/mcp_healthcheck.py
 ```
 
 ## Roadmap

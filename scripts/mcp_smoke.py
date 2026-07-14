@@ -69,6 +69,9 @@ def main() -> None:
             assert any(tool["name"] == "search_fixes_vector" for tool in tools)
             assert any(tool["name"] == "rebuild_vector_index" for tool in tools)
             assert any(tool["name"] == "search_memory" for tool in tools)
+            assert any(tool["name"] == "should_search_memory" for tool in tools)
+            assert any(tool["name"] == "smart_search_memory" for tool in tools)
+            assert any(tool["name"] == "task_state" for tool in tools)
             assert any(tool["name"] == "assess_memory" for tool in tools)
             assert any(tool["name"] == "save_memory" for tool in tools)
 
@@ -84,6 +87,7 @@ def main() -> None:
                             "title": "Python path smoke",
                             "error": "ModuleNotFoundError",
                             "tags": "python,path",
+                            "verified": True,
                         },
                     },
                 },
@@ -148,6 +152,57 @@ def main() -> None:
                         "arguments": {
                             "query": "model routing CCSwitch",
                             "memory_type": "preference",
+                        },
+                    },
+                },
+            )
+            assert "Use CCSwitch" in read_message(process)["result"]["content"][0]["text"]
+
+            write_message(
+                process,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 8,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "should_search_memory",
+                        "arguments": {"query": "ModuleNotFoundError python main.py"},
+                    },
+                },
+            )
+            assert '"decision": "search"' in read_message(process)["result"]["content"][0]["text"]
+
+            write_message(
+                process,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "task_state",
+                        "arguments": {
+                            "action": "start",
+                            "goal": "smoke test smart search",
+                            "project": "demo",
+                        },
+                    },
+                },
+            )
+            assert "smoke test smart search" in read_message(process)["result"]["content"][0]["text"]
+
+            write_message(
+                process,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 10,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "smart_search_memory",
+                        "arguments": {
+                            "query": "CCSwitch model routing",
+                            "search_scope": "memory",
+                            "memory_type": "preference",
+                            "force": True,
                         },
                     },
                 },

@@ -32,8 +32,13 @@ def save_fix_case(
     tags: str = "",
     source_tool: str = "mcp",
     status: Literal["fixed", "failed", "partial"] = "fixed",
+    verified: bool = False,
+    repeat_observed: bool = False,
+    duration_minutes: int = 0,
+    user_requested: bool = False,
+    sensitivity: Literal["public", "private", "secret"] = "private",
 ) -> str:
-    """Save a local Markdown fix case for a real coding error or failed attempt."""
+    """Assess, deduplicate, and save a local Markdown fix case when it is durable enough."""
     args = argparse.Namespace(
         title=title,
         project=project,
@@ -44,23 +49,122 @@ def save_fix_case(
         tags=tags,
         source_tool=source_tool,
         status=status,
+        verified=verified,
+        repeat_observed=repeat_observed,
+        duration_minutes=duration_minutes,
+        user_requested=user_requested,
+        sensitivity=sensitivity,
+        force=False,
     )
-    path = fix_memory.create_case(args)
-    return f"Saved fix case: {path}"
+    result = fix_memory.save_fix_case_entry(args)
+    if result["action"] == "skipped":
+        return json.dumps(result, ensure_ascii=False, indent=2)
+    return f"Saved fix case: {result['path']} ({result['assessment']['memory_status']})"
 
 
 @mcp.tool()
-def search_fixes(query: str, limit: int = 5) -> str:
+def search_fixes(query: str, limit: int = 5, include_candidates: bool = False) -> str:
     """Search local fix cases with hybrid keyword + vector retrieval."""
-    results = fix_memory.find_cases(query, limit, mode="hybrid")
+    results = fix_memory.search_fix_items(
+        query, limit, mode="hybrid", include_candidates=include_candidates
+    )
     return json.dumps(results, ensure_ascii=False, indent=2)
 
 
 @mcp.tool()
-def search_memory(query: str, memory_type: str = "", limit: int = 5, mode: Literal["hybrid", "keyword", "vector"] = "hybrid") -> str:
+def search_memory(
+    query: str,
+    memory_type: str = "",
+    limit: int = 5,
+    mode: Literal["hybrid", "keyword", "vector"] = "hybrid",
+    include_candidates: bool = False,
+) -> str:
     """Search long-term memory with optional memory type filtering."""
-    results = fix_memory.search_memory_items(query, limit=limit, memory_type=memory_type, mode=mode)
+    results = fix_memory.search_memory_items(
+        query,
+        limit=limit,
+        memory_type=memory_type,
+        mode=mode,
+        include_candidates=include_candidates,
+    )
     return json.dumps(results, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def should_search_memory(
+    query: str,
+    context: str = "",
+    project: str = "",
+    command: str = "",
+    file_path: str = "",
+    memory_type: str = "",
+    force: bool = False,
+) -> str:
+    """Decide whether this task should search long-term memory before work continues."""
+    result = fix_memory.should_search_memory(
+        query,
+        context=context,
+        project=project,
+        command=command,
+        file_path=file_path,
+        memory_type=memory_type,
+        force=force,
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def smart_search_memory(
+    query: str,
+    search_scope: Literal["memory", "fixes"] = "memory",
+    memory_type: str = "",
+    limit: int = 5,
+    mode: Literal["hybrid", "keyword", "vector"] = "hybrid",
+    context: str = "",
+    project: str = "",
+    command: str = "",
+    file_path: str = "",
+    force: bool = False,
+    include_candidates: bool = False,
+) -> str:
+    """Use the retrieval gate and semantic cache before searching memory or fix cases."""
+    result = fix_memory.smart_search(
+        query,
+        search_scope=search_scope,
+        limit=limit,
+        memory_type=memory_type,
+        mode=mode,
+        context=context,
+        project=project,
+        command=command,
+        file_path=file_path,
+        force=force,
+        include_candidates=include_candidates,
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def task_state(
+    action: Literal["start", "show", "note", "verify", "clear"] = "show",
+    goal: str = "",
+    project: str = "",
+    task_id: str = "",
+    note: str = "",
+    item: str = "",
+) -> str:
+    """Manage current task working memory without writing long-term memory."""
+    if action == "start":
+        result = fix_memory.start_task_state(goal or "ad-hoc task", project=project, task_id=task_id)
+    elif action == "note":
+        result = fix_memory.append_task_event(event_type="note", value=note, project=project, goal=goal)
+    elif action == "verify":
+        result = fix_memory.append_task_event(event_type="verified", value=item, project=project, goal=goal)
+    elif action == "clear":
+        result = fix_memory.clear_task_state()
+    else:
+        result = fix_memory.load_task_state()
+    return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 @mcp.tool()
@@ -125,9 +229,11 @@ def save_memory(
 
 
 @mcp.tool()
-def search_fixes_vector(query: str, limit: int = 5) -> str:
+def search_fixes_vector(query: str, limit: int = 5, include_candidates: bool = False) -> str:
     """Search local fix cases using only TF-IDF vector cosine similarity."""
-    results = fix_memory.find_cases(query, limit, mode="vector")
+    results = fix_memory.search_fix_items(
+        query, limit, mode="vector", include_candidates=include_candidates
+    )
     return json.dumps(results, ensure_ascii=False, indent=2)
 
 
