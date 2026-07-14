@@ -1,5 +1,7 @@
 # Fix Memory MCP
 
+[中文文档](README.zh-CN.md) | [English](README.md)
+
 > Stop debugging the same error twice.
 
 Fix Memory MCP is a local-first developer memory system for bugs.
