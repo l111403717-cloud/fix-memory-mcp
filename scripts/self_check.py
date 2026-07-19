@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import os
 import subprocess
 import sys
@@ -111,6 +112,47 @@ def main() -> None:
         assert all(
             item["path"] != str(candidate_path) for item in archived_candidate
         ), "archived candidates must not be retrieved"
+
+        first_observation = fix_memory.record_error_observation(
+            error="ModuleNotFoundError: No module named worker_app",
+            project="worker-service",
+            command="python worker_app/main.py",
+            file_path="worker_app/main.py",
+        )
+        assert first_observation["action"] == "observed", "first simple error should only be observed"
+        assert first_observation["occurrence_count"] == 1, "first observation count is wrong"
+
+        second_observation = fix_memory.record_error_observation(
+            error="ModuleNotFoundError: No module named worker_app at line 42",
+            project="worker-service",
+            command="python worker_app/main.py",
+            file_path="worker_app/main.py",
+        )
+        assert second_observation["action"] == "candidate_created", "second occurrence should create a candidate"
+        observed_case_path = Path(str(second_observation["path"]))
+        observed_case_meta, _ = fix_memory.parse_frontmatter(
+            observed_case_path.read_text(encoding="utf-8")
+        )
+        assert observed_case_meta["memory_status"] == "candidate", "second occurrence must stay a candidate"
+
+        third_observation = fix_memory.record_error_observation(
+            error="ModuleNotFoundError: No module named worker_app at line 99",
+            project="worker-service",
+            command="python worker_app/main.py",
+            file_path="worker_app/main.py",
+        )
+        assert third_observation["action"] == "activated", "third occurrence should activate the case"
+        active_observed_meta, _ = fix_memory.parse_frontmatter(
+            observed_case_path.read_text(encoding="utf-8")
+        )
+        assert active_observed_meta["memory_status"] == "active", "third occurrence did not activate the case"
+        assert active_observed_meta["occurrence_count"] == 3, "observed occurrences were not retained"
+
+        secret_observation = fix_memory.record_error_observation(
+            error="Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
+            project="worker-service",
+        )
+        assert secret_observation["action"] == "skipped", "secret-looking errors must not enter observations"
 
         save_result = fix_memory_mcp.save_fix_case(
             title="Next.js build suspense",
@@ -285,12 +327,54 @@ def main() -> None:
         task_cli = run_cli(memory_root, "task-state", "verify", "--item", "self-check verified")
         assert "self-check verified" in task_cli, "task-state CLI verify failed"
 
+        review_candidate = json.loads(
+            run_cli(
+                memory_root,
+                "remember",
+                "--memory-type",
+                "preference",
+                "--title",
+                "CLI review candidate",
+                "--content",
+                "User may prefer batch candidate review.",
+                "--source",
+                "inferred",
+            )
+        )
+        review_candidate_path = Path(str(review_candidate["path"]))
+        review_candidate_id = fix_memory.parse_frontmatter(
+            review_candidate_path.read_text(encoding="utf-8")
+        )[0]["memory_id"]
+        review_cli = json.loads(run_cli(memory_root, "memory", "review"))
+        assert Path(str(review_cli["path"])).exists(), "candidate review CLI did not write an artifact"
+        applied_review = json.loads(
+            run_cli(memory_root, "memory", "review", "--approve", review_candidate_id)
+        )
+        assert applied_review["action"] == "review_applied", "candidate review CLI did not apply approval"
+        reviewed_meta, _ = fix_memory.parse_frontmatter(review_candidate_path.read_text(encoding="utf-8"))
+        assert reviewed_meta["memory_status"] == "active"
+        assert reviewed_meta["source"] == "inferred"
+        assert reviewed_meta["promotion_method"] == "batch_review"
+
         mcp_assess = fix_memory_mcp.assess_memory(
             memory_type="interview",
             title="Redis why not use",
             content="User could not explain why Redis is not used.",
         )
         assert "save" in mcp_assess, "MCP assess_memory failed"
+
+        for authoritative_source in ("user_explicit", "system"):
+            try:
+                fix_memory_mcp.save_memory(
+                    memory_type="constraint",
+                    title=f"Rejected {authoritative_source}",
+                    content="Agent-facing MCP must reject authoritative sources.",
+                    source=authoritative_source,
+                )
+            except ValueError as exc:
+                assert "reject authoritative source" in str(exc)
+            else:
+                raise AssertionError(f"MCP accepted authoritative source: {authoritative_source}")
 
         mcp_save = fix_memory_mcp.save_memory(
             memory_type="interview",

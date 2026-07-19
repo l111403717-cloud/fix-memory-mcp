@@ -1,4 +1,4 @@
 interface:
   display_name: "Fix Memory Workflow"
-  short_description: "代码报错先查向量错题库，修好后写回记录"
-  default_prompt: "Use $fix-memory-workflow to debug this code error with my local fix-memory case library."
+  short_description: "跨窗口组装核心上下文，并复用已验证的修复记忆"
+  default_prompt: "Use $fix-memory-workflow to assemble my scoped operating context, follow active project policy, and use deeper fix retrieval only when the task has a real error or repeated issue."

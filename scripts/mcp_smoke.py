@@ -10,6 +10,11 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PUBLIC_MCP_TOOLS = {
+    "assemble_context",
+    "manage_memory",
+    "maintain_memory_lifecycle",
+}
 
 
 def write_message(process: subprocess.Popen[str], message: dict[str, Any]) -> None:
@@ -32,185 +37,143 @@ def read_message(process: subprocess.Popen[str]) -> dict[str, Any]:
 
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="fix-memory-mcp-") as tmp:
-        env = os.environ.copy()
-        env["FIX_MEMORY_ROOT"] = tmp
-        process = subprocess.Popen(
-            [sys.executable, str(ROOT / "scripts" / "fix_memory_mcp.py")],
-            cwd=ROOT,
-            env=env,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-        )
+        previous_root = os.environ.get("FIX_MEMORY_ROOT")
+        os.environ["FIX_MEMORY_ROOT"] = tmp
         try:
-            write_message(
-                process,
-                {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "initialize",
-                    "params": {
-                        "protocolVersion": "2025-06-18",
-                        "capabilities": {},
-                        "clientInfo": {"name": "smoke-test", "version": "0.1.0"},
-                    },
-                },
+            env = os.environ.copy()
+            process = subprocess.Popen(
+                [sys.executable, str(ROOT / "scripts" / "fix_memory_mcp.py")],
+                cwd=ROOT,
+                env=env,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
             )
-            initialize = read_message(process)["result"]
-            assert initialize["serverInfo"]["name"] == "fix-memory"
-
-            write_message(process, {"jsonrpc": "2.0", "method": "notifications/initialized"})
-
-            write_message(process, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-            tools = read_message(process)["result"]["tools"]
-            assert any(tool["name"] == "search_fixes" for tool in tools)
-            assert any(tool["name"] == "search_fixes_vector" for tool in tools)
-            assert any(tool["name"] == "rebuild_vector_index" for tool in tools)
-            assert any(tool["name"] == "search_memory" for tool in tools)
-            assert any(tool["name"] == "should_search_memory" for tool in tools)
-            assert any(tool["name"] == "smart_search_memory" for tool in tools)
-            assert any(tool["name"] == "task_state" for tool in tools)
-            assert any(tool["name"] == "assess_memory" for tool in tools)
-            assert any(tool["name"] == "save_memory" for tool in tools)
-
-            write_message(
-                process,
-                {
-                    "jsonrpc": "2.0",
-                    "id": 3,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "save_fix_case",
-                        "arguments": {
-                            "title": "Python path smoke",
-                            "error": "ModuleNotFoundError",
-                            "tags": "python,path",
-                            "verified": True,
+            try:
+                write_message(
+                    process,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": "2025-06-18",
+                            "capabilities": {},
+                            "clientInfo": {"name": "smoke-test", "version": "0.1.0"},
                         },
                     },
-                },
-            )
-            assert "Saved fix case" in read_message(process)["result"]["content"][0]["text"]
+                )
+                initialize = read_message(process)["result"]
+                assert initialize["serverInfo"]["name"] == "fix-memory"
 
-            write_message(
-                process,
-                {
-                    "jsonrpc": "2.0",
-                    "id": 4,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "search_fixes",
-                        "arguments": {"query": "ModuleNotFoundError path"},
-                    },
-                },
-            )
-            assert "Python path smoke" in read_message(process)["result"]["content"][0]["text"]
+                write_message(process, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+                write_message(process, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+                tools = read_message(process)["result"]["tools"]
+                assert {tool["name"] for tool in tools} == PUBLIC_MCP_TOOLS
 
-            write_message(
-                process,
-                {
-                    "jsonrpc": "2.0",
-                    "id": 5,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "search_fixes_vector",
-                        "arguments": {"query": "python module path"},
-                    },
-                },
-            )
-            assert "Python path smoke" in read_message(process)["result"]["content"][0]["text"]
-
-            write_message(
-                process,
-                {
-                    "jsonrpc": "2.0",
-                    "id": 6,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "save_memory",
-                        "arguments": {
-                            "memory_type": "preference",
-                            "title": "Use CCSwitch",
-                            "content": "User prefers CCSwitch for model routing.",
-                            "tags": "ccswitch,preference",
+                write_message(
+                    process,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 3,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "manage_memory",
+                            "arguments": {
+                                "action": "save",
+                                "memory_type": "constraint",
+                                "title": "Forged authoritative source",
+                                "content": "This write must be rejected.",
+                                "source": "user_explicit",
+                            },
                         },
                     },
-                },
-            )
-            assert "created" in read_message(process)["result"]["content"][0]["text"]
+                )
+                rejected_source = read_message(process)["result"]
+                assert rejected_source["isError"] is True, "MCP accepted an authoritative source"
 
-            write_message(
-                process,
-                {
-                    "jsonrpc": "2.0",
-                    "id": 7,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "search_memory",
-                        "arguments": {
-                            "query": "model routing CCSwitch",
-                            "memory_type": "preference",
+                write_message(
+                    process,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 4,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "manage_memory",
+                            "arguments": {
+                                "action": "save",
+                                "memory_type": "user",
+                                "title": "AI application builder",
+                                "content": "User builds practical AI applications by integrating tools.",
+                                "source": "observed",
+                                "user_requested": True,
+                                "context_section": "profile",
+                                "priority": 9,
+                            },
                         },
                     },
-                },
-            )
-            assert "Use CCSwitch" in read_message(process)["result"]["content"][0]["text"]
+                )
+                saved_profile = json.loads(read_message(process)["result"]["content"][0]["text"])
+                assert saved_profile["action"] == "created", "MCP memory save failed"
 
-            write_message(
-                process,
-                {
-                    "jsonrpc": "2.0",
-                    "id": 8,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "should_search_memory",
-                        "arguments": {"query": "ModuleNotFoundError python main.py"},
-                    },
-                },
-            )
-            assert '"decision": "search"' in read_message(process)["result"]["content"][0]["text"]
-
-            write_message(
-                process,
-                {
-                    "jsonrpc": "2.0",
-                    "id": 9,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "task_state",
-                        "arguments": {
-                            "action": "start",
-                            "goal": "smoke test smart search",
-                            "project": "demo",
+                write_message(
+                    process,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 5,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "assemble_context",
+                            "arguments": {
+                                "query": "Plan an AI application project",
+                                "current_instruction": "Keep the answer practical.",
+                                "context_token_budget": 1000,
+                                "track_usage": False,
+                            },
                         },
                     },
-                },
-            )
-            assert "smoke test smart search" in read_message(process)["result"]["content"][0]["text"]
+                )
+                assembled = json.loads(read_message(process)["result"]["content"][0]["text"])
+                assert assembled["schema_version"] == 2, "MCP context schema is wrong"
+                assert "builds practical AI applications" in assembled["context_text"]
+                assert assembled["budget"]["context_token_budget"] == 1000
 
-            write_message(
-                process,
-                {
-                    "jsonrpc": "2.0",
-                    "id": 10,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "smart_search_memory",
-                        "arguments": {
-                            "query": "CCSwitch model routing",
-                            "search_scope": "memory",
-                            "memory_type": "preference",
-                            "force": True,
+                write_message(
+                    process,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 6,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "manage_memory",
+                            "arguments": {"action": "show", "identifier": saved_profile["path"]},
                         },
                     },
-                },
-            )
-            assert "Use CCSwitch" in read_message(process)["result"]["content"][0]["text"]
+                )
+                shown = json.loads(read_message(process)["result"]["content"][0]["text"])
+                assert shown["action"] == "shown", "MCP memory inspection failed"
+
+                write_message(
+                    process,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 7,
+                        "method": "tools/call",
+                        "params": {"name": "maintain_memory_lifecycle", "arguments": {}},
+                    },
+                )
+                lifecycle = json.loads(read_message(process)["result"]["content"][0]["text"])
+                assert "expired" in lifecycle, "MCP lifecycle maintenance failed"
+            finally:
+                process.terminate()
+                process.wait(timeout=5)
         finally:
-            process.terminate()
-            process.wait(timeout=5)
+            if previous_root is None:
+                os.environ.pop("FIX_MEMORY_ROOT", None)
+            else:
+                os.environ["FIX_MEMORY_ROOT"] = previous_root
 
     print("mcp smoke passed")
 

@@ -20,6 +20,10 @@ data/interviews/*
 data/projects/*
 data/prompts/*
 data/episodes/*
+data/users/*
+data/decisions/*
+data/tasks/*
+data/constraints/*
 !data/fixes/.gitkeep
 !data/failed-attempts/.gitkeep
 !data/commands/.gitkeep
@@ -30,12 +34,17 @@ data/episodes/*
 !data/projects/.gitkeep
 !data/prompts/.gitkeep
 !data/episodes/.gitkeep
+!data/users/.gitkeep
+!data/decisions/.gitkeep
+!data/tasks/.gitkeep
+!data/constraints/.gitkeep
 
 # Local OS/editor noise
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
+.obsidian/
 
 # Logs and scratch
 *.log

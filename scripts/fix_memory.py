@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -28,9 +29,26 @@ MEMORY_BUCKETS = {
     "project": "projects",
     "prompt": "prompts",
     "episode": "episodes",
+    "user": "users",
+    "decision": "decisions",
+    "task": "tasks",
+    "constraint": "constraints",
 }
 
-STRONG_MEMORY_TYPES = {"preference", "environment", "interview", "project"}
+STRONG_MEMORY_TYPES = {
+    "preference",
+    "environment",
+    "interview",
+    "project",
+    "user",
+    "decision",
+    "constraint",
+}
+V2_MEMORY_CATEGORIES = {"user", "project", "decision", "task", "constraint"}
+VALID_SCOPES = ("current", "task", "project", "workspace", "global")
+VALID_EXECUTION_LEVELS = ("hard", "guarded", "soft")
+VALID_CONTEXT_SECTIONS = ("profile", "current_focus", "active_projects", "long_term_goals", "preferences", "")
+AGENT_WRITABLE_SOURCES = ("observed", "inferred", "imported")
 ENVIRONMENT_HINT_RE = re.compile(
     r"(?:\b(?:api|proxy|ccswitch|port|path|python|node|npm|pnpm|uv|venv|mcp|token|key|cookie|password|account)\b|账号|路径|端口|中转|环境|模型|代理|密钥)",
     re.IGNORECASE,
@@ -55,9 +73,12 @@ CONFIG_PATH_RE = re.compile(
 RUNTIME_DIR = ".runtime"
 TASK_STATE_FILE = "task_state.json"
 RETRIEVAL_CACHE_FILE = "retrieval_cache.json"
+ERROR_OBSERVATIONS_FILE = "error_observations.json"
 CACHE_SIMILARITY_THRESHOLD = 0.72
 CACHE_MAX_AGE_HOURS = 12
 CANDIDATE_MAX_AGE_DAYS = 30
+OBSERVATION_CANDIDATE_THRESHOLD = 2
+OBSERVATION_ACTIVE_THRESHOLD = 3
 ACTIVE_MEMORY_STATUS = "active"
 CANDIDATE_MEMORY_STATUS = "candidate"
 ARCHIVED_MEMORY_STATUS = "archived"
@@ -83,6 +104,55 @@ def parse_tags(raw: str | None) -> list[str]:
     if not raw:
         return []
     return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def parse_csv(raw: str | None) -> list[str]:
+    return parse_tags(raw)
+
+
+def confidence_score(value: object) -> float:
+    if isinstance(value, (int, float)):
+        return max(0.0, min(1.0, float(value)))
+    return {"high": 0.9, "medium": 0.65, "low": 0.35}.get(str(value).lower(), 0.5)
+
+
+def validate_agent_writable_source(source: str) -> str:
+    if source not in AGENT_WRITABLE_SOURCES:
+        allowed = ", ".join(AGENT_WRITABLE_SOURCES)
+        raise ValueError(
+            f"Agent-writable interfaces reject authoritative source '{source}'. "
+            f"Allowed sources: {allowed}"
+        )
+    return source
+
+
+def default_priority(memory_type: str) -> int:
+    return {
+        "constraint": 9,
+        "decision": 8,
+        "task": 8,
+        "user": 7,
+        "project": 7,
+        "preference": 6,
+        "environment": 6,
+        "bug": 6,
+        "fix": 6,
+    }.get(memory_type, 5)
+
+
+def stable_memory_id(*, title: str, memory_type: str, project: str, scope: str) -> str:
+    source = json.dumps(
+        {
+            "title": slugify(title),
+            "memory_type": memory_type,
+            "project": project.strip().lower(),
+            "scope": scope,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return f"{memory_type}-{hashlib.sha256(source.encode('utf-8')).hexdigest()[:16]}"
 
 
 def frontmatter_value(value: object) -> str:
@@ -460,24 +530,64 @@ def base_meta(
     sensitivity: str = "private",
     tags: list[str] | None = None,
     status: str = "active",
+    priority: int | None = None,
+    source: str = "observed",
+    evidence_refs: list[str] | None = None,
+    reason: str = "",
+    workspace: str = "",
+    task_id: str = "",
+    context_section: str = "",
+    execution_level: str = "soft",
+    policy_key: str = "",
+    expires_at: str = "",
+    superseded_by: str = "",
 ) -> dict[str, object]:
     timestamp = now_iso()
+    resolved_priority = default_priority(memory_type) if priority is None else max(0, min(10, priority))
+    resolved_scope = scope if scope in VALID_SCOPES else "global"
+    resolved_execution_level = (
+        execution_level if execution_level in VALID_EXECUTION_LEVELS else "soft"
+    )
     return {
+        "memory_id": stable_memory_id(
+            title=title,
+            memory_type=memory_type,
+            project=project,
+            scope=resolved_scope,
+        ),
         "title": title,
         "memory_type": memory_type,
+        "memory_category": memory_type if memory_type in V2_MEMORY_CATEGORIES else memory_type,
         "memory_status": memory_status,
         "occurrence_count": 1,
         "first_seen": timestamp,
         "last_seen": timestamp,
         "confidence": confidence,
-        "scope": scope,
+        "confidence_score": confidence_score(confidence),
+        "evidence_score": 1.0 if source == "user_explicit" else (0.2 if source == "inferred" else 0.35),
+        "priority": resolved_priority,
+        "scope": resolved_scope,
+        "workspace": workspace,
+        "task_id": task_id,
         "sensitivity": sensitivity,
         "project": project,
         "language": language,
         "framework": framework,
         "command": command,
         "source_tool": source_tool,
+        "source": source,
+        "evidence_refs": evidence_refs or [],
+        "reason": reason,
         "created_at": timestamp,
+        "updated_at": timestamp,
+        "last_verified_at": timestamp if source == "user_explicit" else "",
+        "last_used_at": "",
+        "used_count": 0,
+        "expires_at": expires_at,
+        "superseded_by": superseded_by,
+        "context_section": context_section,
+        "execution_level": resolved_execution_level,
+        "policy_key": policy_key,
         "tags": tags or [],
         "status": status,
     }
@@ -498,6 +608,17 @@ def build_case(args: argparse.Namespace) -> str:
         sensitivity=getattr(args, "sensitivity", "private"),
         tags=parse_tags(getattr(args, "tags", "")),
         status=getattr(args, "status", "fixed"),
+        priority=getattr(args, "priority", None),
+        source=getattr(args, "source", "observed"),
+        evidence_refs=parse_csv(getattr(args, "evidence_refs", "")),
+        reason=getattr(args, "reason", ""),
+        workspace=getattr(args, "workspace", ""),
+        task_id=getattr(args, "task_id", ""),
+        context_section=getattr(args, "context_section", ""),
+        execution_level=getattr(args, "execution_level", "soft"),
+        policy_key=getattr(args, "policy_key", ""),
+        expires_at=getattr(args, "expires_at", ""),
+        superseded_by=getattr(args, "superseded_by", ""),
     )
     meta["first_seen"] = getattr(args, "first_seen", meta["first_seen"])
     meta["last_seen"] = getattr(args, "last_seen", meta["last_seen"])
@@ -667,11 +788,12 @@ def assess_memory_value(
     duration_minutes: int = 0,
     user_requested: bool = False,
     occurrence_count: int = 1,
+    source: str = "",
 ) -> dict[str, object]:
     text = f"{title}\n{content}"
     reasons: list[str] = []
 
-    if user_requested:
+    if user_requested or source == "user_explicit":
         reasons.append("user explicitly asked to remember it")
     if repeat_observed or occurrence_count >= 2:
         reasons.append("it has repeated at least twice")
@@ -679,6 +801,13 @@ def assess_memory_value(
         reasons.append("it cost at least 10 minutes")
     if verified and memory_type in {"bug", "fix", "failed_attempt"}:
         reasons.append("the fix was verified")
+    if source == "inferred" and not user_requested:
+        return {
+            "decision": "candidate",
+            "memory_status": "candidate",
+            "confidence": "low",
+            "reasons": ["AI inference requires more evidence or user confirmation"],
+        }
     if memory_type in STRONG_MEMORY_TYPES:
         reasons.append(f"{memory_type} memory is durable by default")
     if memory_type == "workflow" and (repeat_observed or occurrence_count >= 2):
@@ -711,6 +840,7 @@ def assess_memory_value(
 
 
 def assess_memory(args: argparse.Namespace) -> None:
+    validate_agent_writable_source(getattr(args, "source", "observed"))
     result = assess_memory_value(
         args.memory_type,
         args.title,
@@ -719,6 +849,7 @@ def assess_memory(args: argparse.Namespace) -> None:
         repeat_observed=args.repeat_observed,
         duration_minutes=args.duration_minutes,
         user_requested=args.user_requested,
+        source=getattr(args, "source", ""),
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
@@ -775,6 +906,19 @@ def memory_meta(args: argparse.Namespace, assessment: dict[str, object]) -> dict
         sensitivity=args.sensitivity,
         tags=parse_tags(args.tags),
         status=status,
+        priority=getattr(args, "priority", None),
+        source=getattr(args, "source", "observed"),
+        evidence_refs=parse_csv(getattr(args, "evidence_refs", "")),
+        reason=getattr(args, "reason", "") or "; ".join(
+            str(item) for item in assessment.get("reasons", [])
+        ),
+        workspace=getattr(args, "workspace", ""),
+        task_id=getattr(args, "task_id", ""),
+        context_section=getattr(args, "context_section", ""),
+        execution_level=getattr(args, "execution_level", "soft"),
+        policy_key=getattr(args, "policy_key", ""),
+        expires_at=getattr(args, "expires_at", ""),
+        superseded_by=getattr(args, "superseded_by", ""),
     )
 
 
@@ -784,7 +928,8 @@ def iter_cases(root: Path) -> list[Path]:
     files = [
         path
         for path in root.rglob("*.md")
-        if not any(part.startswith(".") for part in path.relative_to(root).parts)
+        if path.is_file()
+        and not any(part.startswith(".") for part in path.relative_to(root).parts)
     ]
     return sorted(files, key=lambda path: path.stat().st_mtime, reverse=True)
 
@@ -920,6 +1065,11 @@ def archive_stale_candidates(root: Path | None = None, max_age_days: int = CANDI
         meta, body = parse_frontmatter(path.read_text(encoding="utf-8", errors="ignore"))
         if meta.get("memory_status") != CANDIDATE_MEMORY_STATUS:
             continue
+        deferred_until = parse_iso(str(meta.get("review_deferred_until", "")))
+        if deferred_until:
+            current = dt.datetime.now(deferred_until.tzinfo) if deferred_until.tzinfo else dt.datetime.now()
+            if deferred_until > current:
+                continue
         last_seen = parse_iso(str(meta.get("last_seen", "")))
         if last_seen is None or last_seen > cutoff:
             continue
@@ -970,7 +1120,18 @@ def update_existing_memory(path: Path, args: argparse.Namespace, assessment: dic
     timestamp = now_iso()
     occurrence_count = int(meta.get("occurrence_count", 1)) + 1
     current_status = str(meta.get("memory_status", "candidate"))
-    new_status = "active" if occurrence_count >= 2 or assessment["memory_status"] == "active" else current_status
+    source = getattr(args, "source", str(meta.get("source", "observed")))
+    evidence_score = float(meta.get("evidence_score", 0.0))
+    if source == "user_explicit" or getattr(args, "user_requested", False):
+        evidence_score = 1.0
+    else:
+        evidence_score += 0.35 if getattr(args, "verified", False) else 0.2
+        if getattr(args, "repeat_observed", False):
+            evidence_score += 0.25
+    evidence_score = min(1.0, evidence_score)
+    new_status = current_status
+    if assessment["memory_status"] == "active" or evidence_score >= 0.75:
+        new_status = "active"
     evidence = getattr(args, "evidence", "") or getattr(args, "content", "") or fix_case_content(args)
 
     meta.update(
@@ -980,10 +1141,31 @@ def update_existing_memory(path: Path, args: argparse.Namespace, assessment: dic
             "occurrence_count": occurrence_count,
             "last_seen": timestamp,
             "confidence": "high" if new_status == "active" else assessment["confidence"],
+            "confidence_score": 0.9 if new_status == "active" else confidence_score(
+                assessment["confidence"]
+            ),
+            "evidence_score": round(evidence_score, 3),
             "scope": meta.get("scope") or getattr(args, "scope", "global"),
             "sensitivity": meta.get("sensitivity") or getattr(args, "sensitivity", "private"),
+            "updated_at": timestamp,
+            "last_verified_at": timestamp
+            if getattr(args, "verified", False) or source == "user_explicit"
+            else meta.get("last_verified_at", ""),
+            "source": source,
+            "reason": getattr(args, "reason", "") or meta.get("reason", ""),
+            "priority": max(
+                int(meta.get("priority", default_priority(args.memory_type))),
+                int(getattr(args, "priority", default_priority(args.memory_type)) or 0),
+            ),
         }
     )
+    refs = meta.get("evidence_refs", [])
+    if not isinstance(refs, list):
+        refs = []
+    for ref in parse_csv(getattr(args, "evidence_refs", "")):
+        if ref not in refs:
+            refs.append(ref)
+    meta["evidence_refs"] = refs
 
     body = body.rstrip() + f"""
 
@@ -1001,9 +1183,170 @@ def update_existing_memory(path: Path, args: argparse.Namespace, assessment: dic
     return path
 
 
+def error_observations_default() -> dict[str, object]:
+    return {"version": 1, "entries": []}
+
+
+def normalise_observation_text(value: str) -> str:
+    value = value.lower().strip()
+    value = re.sub(r"[a-z]:\\[^\s'\"]+|/[^\s'\"]+", "<path>", value)
+    value = re.sub(r"\b(?:at\s+)?line\s+\d+\b", "", value)
+    value = re.sub(r"\bline\s*=\s*\d+\b", "", value)
+    value = re.sub(r"\s+", " ", value)
+    return value.strip(" :,-")
+
+
+def error_type_from_text(error: str) -> str:
+    match = re.search(r"\b([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception))\b", error)
+    return match.group(1) if match else "error"
+
+
+def error_observation_signature(
+    *, project: str, error: str, command: str, file_path: str
+) -> tuple[str, dict[str, str]]:
+    error_type = error_type_from_text(error)
+    normalized = {
+        "project": normalise_observation_text(project),
+        "error_type": error_type,
+        "error": normalise_observation_text(error),
+        "command": normalise_observation_text(command),
+        "file_path": Path(file_path).name.lower(),
+    }
+    source = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()[:24], normalized
+
+
+def observation_case_title(entry: dict[str, object]) -> str:
+    project = str(entry.get("project", "")) or "local task"
+    error_type = str(entry.get("error_type", "error"))
+    return f"Repeated {error_type} in {project}"
+
+
+def write_observation_case(root: Path, entry: dict[str, object]) -> Path:
+    args = argparse.Namespace(
+        title=observation_case_title(entry),
+        project=str(entry.get("project", "")),
+        language="",
+        framework="",
+        command=str(entry.get("command", "")),
+        error=str(entry.get("normalized_error", "")),
+        tags=f"observed,error,{str(entry.get('error_type', 'error')).lower()}",
+        source_tool="error-observation",
+        status="partial",
+        memory_type="bug",
+        memory_status=CANDIDATE_MEMORY_STATUS,
+        confidence="medium",
+        scope="project" if entry.get("project") else "global",
+        sensitivity="private",
+    )
+    return write_case_file(args, root)
+
+
+def activate_observation_case(root: Path, entry: dict[str, object]) -> Path | None:
+    relative_path = str(entry.get("case_path", ""))
+    path = root / relative_path
+    if not relative_path or not path.exists():
+        return None
+    meta, body = parse_frontmatter(path.read_text(encoding="utf-8", errors="ignore"))
+    occurrence_count = int(entry["occurrence_count"])
+    meta.update(
+        {
+            "memory_type": "bug",
+            "memory_status": ACTIVE_MEMORY_STATUS,
+            "occurrence_count": occurrence_count,
+            "last_seen": now_iso(),
+            "confidence": "high",
+            "status": "active",
+        }
+    )
+    body = body.rstrip() + f"""
+
+## 观察升级
+
+- 自动观察到相同错误第 {occurrence_count} 次出现，已升级为 active。
+"""
+    write_memory_file(path, meta, body)
+    vector_search.build_index(root)
+    return path
+
+
+def record_error_observation(
+    *,
+    error: str,
+    project: str = "",
+    command: str = "",
+    file_path: str = "",
+    root: Path | None = None,
+) -> dict[str, object]:
+    """Count recurring errors without exposing first occurrences to default RAG."""
+    root = root or memory_root()
+    ensure_dirs(root)
+    if contains_sensitive_material(error, project, command, file_path):
+        return {"action": "skipped", "reason": "secret-looking material must not be observed"}
+
+    fingerprint, normalized = error_observation_signature(
+        project=project, error=error, command=command, file_path=file_path
+    )
+    data = load_json_file(runtime_path(ERROR_OBSERVATIONS_FILE, root), error_observations_default())
+    entries = data.get("entries", [])
+    if not isinstance(entries, list):
+        entries = []
+
+    entry = next(
+        (item for item in entries if isinstance(item, dict) and item.get("fingerprint") == fingerprint),
+        None,
+    )
+    timestamp = now_iso()
+    if entry is None:
+        entry = {
+            "fingerprint": fingerprint,
+            "project": project,
+            "error_type": normalized["error_type"],
+            "normalized_error": normalized["error"],
+            "command": command,
+            "file_path": normalized["file_path"],
+            "first_seen": timestamp,
+            "last_seen": timestamp,
+            "occurrence_count": 1,
+            "case_path": "",
+        }
+        entries.append(entry)
+    else:
+        entry["last_seen"] = timestamp
+        entry["occurrence_count"] = int(entry.get("occurrence_count", 1)) + 1
+
+    occurrence_count = int(entry["occurrence_count"])
+    action = "observed"
+    case_path = ""
+    if occurrence_count == OBSERVATION_CANDIDATE_THRESHOLD:
+        case = write_observation_case(root, entry)
+        entry["case_path"] = case.relative_to(root).as_posix()
+        case_path = str(case)
+        action = "candidate_created"
+        invalidate_retrieval_cache(root)
+    elif occurrence_count >= OBSERVATION_ACTIVE_THRESHOLD:
+        case = activate_observation_case(root, entry)
+        if case is not None:
+            case_path = str(case)
+            action = "activated" if occurrence_count == OBSERVATION_ACTIVE_THRESHOLD else "active_updated"
+            invalidate_retrieval_cache(root)
+
+    data["version"] = 1
+    data["entries"] = entries
+    write_json_file(runtime_path(ERROR_OBSERVATIONS_FILE, root), data)
+    return {
+        "action": action,
+        "fingerprint": fingerprint,
+        "occurrence_count": occurrence_count,
+        "path": case_path or str(entry.get("case_path", "")),
+    }
+
+
 def save_memory_entry(args: argparse.Namespace) -> dict[str, object]:
     root = memory_root()
     ensure_dirs(root)
+    if not getattr(args, "scope", ""):
+        args.scope = "project" if getattr(args, "project", "") else "global"
     assessment = assess_memory_value(
         args.memory_type,
         args.title,
@@ -1012,6 +1355,7 @@ def save_memory_entry(args: argparse.Namespace) -> dict[str, object]:
         repeat_observed=args.repeat_observed,
         duration_minutes=args.duration_minutes,
         user_requested=args.user_requested,
+        source=getattr(args, "source", ""),
     )
 
     if args.sensitivity == "secret" or contains_sensitive_material(args.title, args.content, args.evidence):
@@ -1036,6 +1380,7 @@ def save_memory_entry(args: argparse.Namespace) -> dict[str, object]:
 
 
 def save_memory(args: argparse.Namespace) -> None:
+    validate_agent_writable_source(getattr(args, "source", "observed"))
     print(json.dumps(save_memory_entry(args), ensure_ascii=False, indent=2))
 
 
@@ -1284,6 +1629,77 @@ def task_state_cli(args: argparse.Namespace) -> None:
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+def observe_error_cli(args: argparse.Namespace) -> None:
+    result = record_error_observation(
+        error=args.error,
+        project=args.project,
+        command=args.command,
+        file_path=args.file_path,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def load_context_engine():
+    try:
+        from . import context_engine
+    except ImportError:
+        import context_engine
+    return context_engine
+
+
+def assemble_context_cli(args: argparse.Namespace) -> None:
+    engine = load_context_engine()
+    result = engine.assemble_context(
+        args.query,
+        context=args.context,
+        project=args.project,
+        workspace=args.workspace,
+        task_id=args.task_id,
+        current_instruction=args.current_instruction,
+        core_token_budget=args.core_token_budget,
+        retrieval_token_budget=args.retrieval_token_budget,
+        policy_token_budget=args.policy_token_budget,
+        context_token_budget=args.context_token_budget,
+        max_items=args.max_items,
+        override_policy_keys=args.override_policy_key,
+        approve_guarded_override=args.approve_guarded_override,
+        track_usage=not args.no_track_usage,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def manage_memory_cli(args: argparse.Namespace) -> None:
+    engine = load_context_engine()
+    if args.memory_action == "review":
+        approve = parse_csv(args.approve)
+        defer = parse_csv(args.defer)
+        archive = parse_csv(args.archive)
+        if approve or defer or archive:
+            result = engine.apply_candidate_review(
+                approve=approve,
+                defer=defer,
+                archive=archive,
+                defer_days=args.defer_days,
+            )
+        else:
+            result = engine.write_candidate_review(project=args.project, limit=args.limit)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    result = engine.manage_memory(
+        args.memory_action,
+        args.identifier,
+        content=getattr(args, "content", ""),
+        reason=getattr(args, "reason", ""),
+        superseded_by=getattr(args, "superseded_by", ""),
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def lifecycle_cli(args: argparse.Namespace) -> None:
+    result = load_context_engine().maintain_lifecycle()
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 def list_recent(limit: int = 10, root: Path | None = None) -> list[dict[str, str]]:
     root = root or memory_root()
     recent = []
@@ -1350,12 +1766,27 @@ def add_memory_gate_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--tags", default="")
     parser.add_argument("--evidence", default="")
     parser.add_argument("--source-tool", default="")
-    parser.add_argument("--scope", default="global")
+    parser.add_argument("--scope", choices=VALID_SCOPES, default="")
     parser.add_argument("--sensitivity", choices=["public", "private", "secret"], default="private")
     parser.add_argument("--duration-minutes", type=int, default=0)
     parser.add_argument("--verified", action="store_true")
     parser.add_argument("--repeat-observed", action="store_true")
     parser.add_argument("--user-requested", action="store_true")
+    parser.add_argument("--priority", type=int, choices=range(0, 11), default=None)
+    parser.add_argument(
+        "--source",
+        choices=AGENT_WRITABLE_SOURCES,
+        default="observed",
+    )
+    parser.add_argument("--evidence-refs", default="")
+    parser.add_argument("--reason", default="")
+    parser.add_argument("--workspace", default="")
+    parser.add_argument("--task-id", default="")
+    parser.add_argument("--context-section", choices=VALID_CONTEXT_SECTIONS, default="")
+    parser.add_argument("--execution-level", choices=VALID_EXECUTION_LEVELS, default="soft")
+    parser.add_argument("--policy-key", default="")
+    parser.add_argument("--expires-at", default="")
+    parser.add_argument("--superseded-by", default="")
 
 
 def main() -> None:
@@ -1440,6 +1871,67 @@ def main() -> None:
     task_verify.set_defaults(func=task_state_cli)
     task_clear = task_sub.add_parser("clear", help="clear current working-memory task")
     task_clear.set_defaults(func=task_state_cli)
+
+    observe_parser = sub.add_parser(
+        "observe-error", help="count a recurring error without immediately adding it to RAG"
+    )
+    observe_parser.add_argument("--error", required=True)
+    observe_parser.add_argument("--project", default="")
+    observe_parser.add_argument("--command", default="")
+    observe_parser.add_argument("--file-path", default="")
+    observe_parser.set_defaults(func=observe_error_cli)
+
+    context_parser = sub.add_parser(
+        "context", help="assemble budgeted Core Context, policy, and relevant memory"
+    )
+    context_parser.add_argument("query")
+    context_parser.add_argument("--context", default="")
+    context_parser.add_argument("--project", default="")
+    context_parser.add_argument("--workspace", default="")
+    context_parser.add_argument("--task-id", default="")
+    context_parser.add_argument("--current-instruction", default="")
+    context_parser.add_argument("--core-token-budget", type=int, default=600)
+    context_parser.add_argument("--retrieval-token-budget", type=int, default=800)
+    context_parser.add_argument("--policy-token-budget", type=int, default=400)
+    context_parser.add_argument("--context-token-budget", type=int, default=None)
+    context_parser.add_argument("--max-items", type=int, default=12)
+    context_parser.add_argument("--override-policy-key", action="append", default=[])
+    context_parser.add_argument("--approve-guarded-override", action="store_true")
+    context_parser.add_argument("--no-track-usage", action="store_true")
+    context_parser.set_defaults(func=assemble_context_cli)
+
+    memory_parser = sub.add_parser("memory", help="inspect or update a V2 memory lifecycle")
+    memory_sub = memory_parser.add_subparsers(dest="memory_action", required=True)
+    for action in ("show", "archive", "expire", "promote", "delete"):
+        action_parser = memory_sub.add_parser(action)
+        action_parser.add_argument("identifier")
+        action_parser.add_argument("--reason", default="")
+        action_parser.set_defaults(func=manage_memory_cli)
+    correct_parser = memory_sub.add_parser("correct")
+    correct_parser.add_argument("identifier")
+    correct_parser.add_argument("--content", required=True)
+    correct_parser.add_argument("--reason", default="")
+    correct_parser.set_defaults(func=manage_memory_cli)
+    supersede_parser = memory_sub.add_parser("supersede")
+    supersede_parser.add_argument("identifier")
+    supersede_parser.add_argument("--superseded-by", required=True)
+    supersede_parser.add_argument("--reason", default="")
+    supersede_parser.set_defaults(func=manage_memory_cli)
+    review_parser = memory_sub.add_parser(
+        "review", help="generate or apply a batch review for candidate memories"
+    )
+    review_parser.add_argument("--project", default="")
+    review_parser.add_argument("--limit", type=int, default=25)
+    review_parser.add_argument("--approve", default="", help="comma-separated candidate ids")
+    review_parser.add_argument("--defer", default="", help="comma-separated candidate ids")
+    review_parser.add_argument("--archive", default="", help="comma-separated candidate ids")
+    review_parser.add_argument("--defer-days", type=int, default=14)
+    review_parser.set_defaults(func=manage_memory_cli)
+
+    lifecycle_parser = sub.add_parser(
+        "lifecycle", help="archive stale candidates and expire dated memories"
+    )
+    lifecycle_parser.set_defaults(func=lifecycle_cli)
 
     recent_parser = sub.add_parser("recent", help="list recent cases")
     recent_parser.add_argument("--limit", type=int, default=10)

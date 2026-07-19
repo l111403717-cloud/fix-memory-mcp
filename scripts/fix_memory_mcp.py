@@ -7,21 +7,22 @@ from typing import Literal
 from mcp.server.fastmcp import FastMCP
 
 try:
-    from . import fix_memory
+    from . import context_engine, fix_memory
 except ImportError:
+    import context_engine
     import fix_memory
 
 
 mcp = FastMCP(
     "fix-memory",
     instructions=(
-        "Local-first coding fix memory. Search previous error fixes before debugging, "
-        "and save clean fix cases after verification."
+        "Local-first Agent Operating Context. Call assemble_context at the start of a new "
+        "task and before consequential actions; use fix search for real repeated errors; "
+        "save only durable, non-sensitive memory."
     ),
 )
 
 
-@mcp.tool()
 def save_fix_case(
     title: str,
     project: str = "",
@@ -62,7 +63,6 @@ def save_fix_case(
     return f"Saved fix case: {result['path']} ({result['assessment']['memory_status']})"
 
 
-@mcp.tool()
 def search_fixes(query: str, limit: int = 5, include_candidates: bool = False) -> str:
     """Search local fix cases with hybrid keyword + vector retrieval."""
     results = fix_memory.search_fix_items(
@@ -71,7 +71,6 @@ def search_fixes(query: str, limit: int = 5, include_candidates: bool = False) -
     return json.dumps(results, ensure_ascii=False, indent=2)
 
 
-@mcp.tool()
 def search_memory(
     query: str,
     memory_type: str = "",
@@ -90,7 +89,6 @@ def search_memory(
     return json.dumps(results, ensure_ascii=False, indent=2)
 
 
-@mcp.tool()
 def should_search_memory(
     query: str,
     context: str = "",
@@ -113,7 +111,6 @@ def should_search_memory(
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
-@mcp.tool()
 def smart_search_memory(
     query: str,
     search_scope: Literal["memory", "fixes"] = "memory",
@@ -144,7 +141,6 @@ def smart_search_memory(
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
-@mcp.tool()
 def task_state(
     action: Literal["start", "show", "note", "verify", "clear"] = "show",
     goal: str = "",
@@ -167,7 +163,22 @@ def task_state(
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
-@mcp.tool()
+def record_error_observation(
+    error: str,
+    project: str = "",
+    command: str = "",
+    file_path: str = "",
+) -> str:
+    """Count a real error; repeated observations become candidate then active fix memory."""
+    result = fix_memory.record_error_observation(
+        error=error,
+        project=project,
+        command=command,
+        file_path=file_path,
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
 def assess_memory(
     memory_type: str,
     title: str,
@@ -176,8 +187,10 @@ def assess_memory(
     repeat_observed: bool = False,
     duration_minutes: int = 0,
     user_requested: bool = False,
+    source: Literal["observed", "inferred", "imported"] = "observed",
 ) -> str:
     """Assess whether something should be saved as long-term memory."""
+    fix_memory.validate_agent_writable_source(source)
     result = fix_memory.assess_memory_value(
         memory_type,
         title,
@@ -186,11 +199,11 @@ def assess_memory(
         repeat_observed=repeat_observed,
         duration_minutes=duration_minutes,
         user_requested=user_requested,
+        source=source,
     )
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
-@mcp.tool()
 def save_memory(
     memory_type: str,
     title: str,
@@ -199,15 +212,27 @@ def save_memory(
     tags: str = "",
     evidence: str = "",
     source_tool: str = "mcp",
-    scope: str = "global",
+    scope: str = "",
     sensitivity: Literal["public", "private", "secret"] = "private",
     duration_minutes: int = 0,
     verified: bool = False,
     repeat_observed: bool = False,
     user_requested: bool = False,
     force: bool = False,
+    priority: int | None = None,
+    source: Literal["observed", "inferred", "imported"] = "observed",
+    evidence_refs: str = "",
+    reason: str = "",
+    workspace: str = "",
+    task_id: str = "",
+    context_section: str = "",
+    execution_level: Literal["hard", "guarded", "soft"] = "soft",
+    policy_key: str = "",
+    expires_at: str = "",
+    superseded_by: str = "",
 ) -> str:
     """Save or update long-term memory through the write gate."""
+    fix_memory.validate_agent_writable_source(source)
     args = argparse.Namespace(
         memory_type=memory_type,
         title=title,
@@ -223,12 +248,110 @@ def save_memory(
         repeat_observed=repeat_observed,
         user_requested=user_requested,
         force=force,
+        priority=priority,
+        source=source,
+        evidence_refs=evidence_refs,
+        reason=reason,
+        workspace=workspace,
+        task_id=task_id,
+        context_section=context_section,
+        execution_level=execution_level,
+        policy_key=policy_key,
+        expires_at=expires_at,
+        superseded_by=superseded_by,
     )
     result = fix_memory.save_memory_entry(args)
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 @mcp.tool()
+def assemble_context(
+    query: str,
+    context: str = "",
+    project: str = "",
+    workspace: str = "",
+    task_id: str = "",
+    current_instruction: str = "",
+    core_token_budget: int = 600,
+    retrieval_token_budget: int = 800,
+    policy_token_budget: int = 400,
+    context_token_budget: int | None = None,
+    max_items: int = 12,
+    override_policy_keys: str = "",
+    approve_guarded_override: bool = False,
+    track_usage: bool = True,
+) -> str:
+    """Assemble minimal Core Context, effective policy, and relevant memory for a task."""
+    result = context_engine.assemble_context(
+        query,
+        context=context,
+        project=project,
+        workspace=workspace,
+        task_id=task_id,
+        current_instruction=current_instruction,
+        core_token_budget=core_token_budget,
+        retrieval_token_budget=retrieval_token_budget,
+        policy_token_budget=policy_token_budget,
+        context_token_budget=context_token_budget,
+        max_items=max_items,
+        override_policy_keys=fix_memory.parse_csv(override_policy_keys),
+        approve_guarded_override=approve_guarded_override,
+        track_usage=track_usage,
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def manage_memory(
+    action: Literal["save", "show", "correct", "promote", "archive", "expire", "supersede", "delete"],
+    identifier: str = "",
+    memory_type: str = "",
+    title: str = "",
+    content: str = "",
+    reason: str = "",
+    superseded_by: str = "",
+    project: str = "",
+    tags: str = "",
+    evidence: str = "",
+    context_section: str = "",
+    priority: int | None = None,
+    user_requested: bool = False,
+    source: Literal["observed", "inferred", "imported"] = "observed",
+) -> str:
+    """Save, inspect, correct, promote, archive, expire, supersede, or delete a memory."""
+    if action == "save":
+        if not memory_type or not title or not content:
+            raise ValueError("memory_type, title, and content are required when action is 'save'")
+        # Uses the existing write gate; source remains agent-writable and untrusted.
+        return save_memory(
+            memory_type=memory_type,
+            title=title,
+            content=content,
+            project=project,
+            tags=tags,
+            evidence=evidence,
+            context_section=context_section,
+            priority=priority,
+            user_requested=user_requested,
+            source=source,
+        )
+    result = context_engine.manage_memory(
+        action,
+        identifier,
+        content=content,
+        reason=reason,
+        superseded_by=superseded_by,
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def maintain_memory_lifecycle() -> str:
+    """Archive stale candidates and expire memories whose validity period ended."""
+    result = context_engine.maintain_lifecycle()
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
 def search_fixes_vector(query: str, limit: int = 5, include_candidates: bool = False) -> str:
     """Search local fix cases using only TF-IDF vector cosine similarity."""
     results = fix_memory.search_fix_items(
@@ -237,7 +360,6 @@ def search_fixes_vector(query: str, limit: int = 5, include_candidates: bool = F
     return json.dumps(results, ensure_ascii=False, indent=2)
 
 
-@mcp.tool()
 def rebuild_vector_index() -> str:
     """Rebuild the local TF-IDF vector index for fix-memory cases."""
     root = fix_memory.memory_root()
@@ -245,13 +367,11 @@ def rebuild_vector_index() -> str:
     return f"Rebuilt vector index: {root / fix_memory.vector_search.INDEX_FILE}\ndocuments: {len(index.get('documents', []))}"
 
 
-@mcp.tool()
 def get_fix_case(path: str) -> str:
     """Read a full fix case by relative path, absolute path, or filename."""
     return fix_memory.read_case(path)
 
 
-@mcp.tool()
 def list_recent_fixes(limit: int = 10) -> str:
     """List recently updated fix cases and failed attempts."""
     recent = fix_memory.list_recent(limit)
